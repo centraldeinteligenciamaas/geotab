@@ -5,7 +5,6 @@ on:
   schedule:
     - cron: "0 9 * * *"    # 06:00 UTC = 03:00 BRT  ← cadastro (baixa carga)
     - cron: "0 12 * * *"   # 09:00 BRT  ← status (início do expediente)
-    - cron: "0 15 * * *"   # 12:00 BRT  ← status (meio-dia)
     - cron: "0 18 * * *"   # 15:00 BRT  ← status + comportamento
     - cron: "0 22 * * *"   # 19:00 BRT  ← sync completo final do dia
 
