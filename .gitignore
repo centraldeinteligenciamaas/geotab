@@ -1,0 +1,32 @@
+# ── Ambiente virtual ─────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Variáveis de ambiente e segredos ─────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Logs gerados pelo script ──────────────────────────────
+*.log
+geotab_sync.log
+
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── IDEs ─────────────────────────────────────────────────
+.vscode/
+.idea/
+*.code-workspace
+
+# ── Sistema operacional ───────────────────────────────────
+.DS_Store
+Thumbs.db
