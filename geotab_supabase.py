@@ -50,10 +50,14 @@ MODO = sys.argv[1] if len(sys.argv) > 1 else "all"
 
 # Diagnósticos de odômetro testados em ordem de prioridade.
 # O primeiro que retornar dados para a frota será usado.
+# Tupla: (id_diagnóstico, fator_de_conversão)
+#   - fator 1    → valor já em km (OBD2 via protocolo CAN)
+#   - fator 1000 → valor em metros (GPS acumulado pelo device)
 DIAG_ODO_CANDIDATOS = [
-    "DiagnosticDeviceTotalDistanceId",
-    "DiagnosticOdometerAdjustmentId",
-    "DiagnosticOdometer",
+    ("DiagnosticOdometerInKilometersId", 1),       # OBD km — odômetro físico real
+    ("DiagnosticDeviceTotalDistanceId",  1000),    # GPS metros — distância desde instalação
+    ("DiagnosticOdometerAdjustmentId",   1000),
+    ("DiagnosticOdometer",               1000),
 ]
 
 
@@ -449,8 +453,10 @@ def extrair_status(credentials):
 # ─────────────────────────────────────────────────────────
 def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
     """
-    Testa cada ID em DIAG_ODO_CANDIDATOS e retorna o mapa {device_id: km}
+    Testa cada entrada de DIAG_ODO_CANDIDATOS e retorna o mapa {device_id: km}
     usando o primeiro diagnóstico que retornar dados para a frota.
+    Cada candidato é uma tupla (diag_id, divisor): divisor=1 para valores já em km,
+    divisor=1000 para valores em metros.
     Se nenhum funcionar nos 30 dias, tenta um fallback de 1 ano para cada.
     """
     def _consultar(diag_id, ini, fim):
@@ -470,20 +476,20 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
             for did in lista_ids
         ])
 
-    def _extrair_mapa(resultados):
+    def _extrair_mapa(resultados, divisor):
         mapa = {}
         for i, resultado in enumerate(resultados):
             did      = lista_ids[i]
             leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
             odo = max((r.get("data") or 0 for r in leituras), default=0)
-            mapa[did] = round(odo / 1000, 2) if odo else 0
+            mapa[did] = round(odo / divisor, 2) if odo else 0
         return mapa
 
     # ── Fase 1: testa cada candidato na janela de 30 dias ─────────────────
-    for diag_id in DIAG_ODO_CANDIDATOS:
-        log.info(f"  • Tentando odômetro via '{diag_id}' (30 dias)...")
+    for diag_id, divisor in DIAG_ODO_CANDIDATOS:
+        log.info(f"  • Tentando odômetro via '{diag_id}' (30 dias, divisor={divisor})...")
         resultados  = _consultar(diag_id, data_inicio, data_fim)
-        odo_map     = _extrair_mapa(resultados)
+        odo_map     = _extrair_mapa(resultados, divisor)
         encontrados = sum(1 for v in odo_map.values() if v > 0)
         log.info(f"    → {encontrados}/{len(lista_ids)} veículos com dado")
 
@@ -491,8 +497,8 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
             log.info(f"  ✓ Diagnóstico de odômetro selecionado: '{diag_id}'")
 
             # Fallback para veículos sem leitura nos 30 dias (busca 1 ano atrás)
-            sem_odo     = [did for did, odo in odo_map.items() if odo == 0]
-            um_ano      = data_inicio - timedelta(days=365)
+            sem_odo = [did for did, odo in odo_map.items() if odo == 0]
+            um_ano  = data_inicio - timedelta(days=365)
             if sem_odo:
                 log.info(f"  • Fallback 1 ano para {len(sem_odo)} veículos sem dado...")
                 res2 = multicall_em_lotes(credentials, [
@@ -515,15 +521,16 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
                     leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
                     odo = max((r.get("data") or 0 for r in leituras), default=0)
                     if odo:
-                        odo_map[did] = round(odo / 1000, 2)
+                        odo_map[did] = round(odo / divisor, 2)
                 recuperados = sum(1 for did in sem_odo if odo_map[did] > 0)
                 log.info(f"    → {recuperados}/{len(sem_odo)} recuperados no fallback")
 
             return odo_map, diag_id
 
     # ── Fase 2: nenhum diagnóstico funcionou ──────────────────────────────
+    diag_ids = [d for d, _ in DIAG_ODO_CANDIDATOS]
     log.warning("  ⚠ Nenhum diagnóstico de odômetro retornou dados para esta frota!")
-    log.warning(f"  ⚠ Diagnósticos testados: {DIAG_ODO_CANDIDATOS}")
+    log.warning(f"  ⚠ Diagnósticos testados: {diag_ids}")
     log.warning("  ⚠ Verifique o log da SONDA acima para identificar o ID correto e adicione-o em DIAG_ODO_CANDIDATOS.")
     return {did: 0 for did in lista_ids}, None
 
