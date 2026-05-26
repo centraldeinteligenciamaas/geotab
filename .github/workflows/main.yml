@@ -1,0 +1,115 @@
+name: Geotab → Supabase Sync
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Horários em BRT (UTC-3)          │  UTC equivalente
+# ─────────────────────────────────┼──────────────────
+# cadastro    → seg-sex 07:00      │  10:00 UTC
+# status      → seg-sex 10x/dia   │  ver crons abaixo
+#               06:00 ~ 19:00 BRT  │
+# comportamento → seg-sex 20:00    │  23:00 UTC
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # ── CADASTRO (1x/dia, seg-sex, 07:00 BRT = 10:00 UTC) ───────────────────
+    - cron: "0 10 * * 1-5"
+
+    # ── STATUS (10x/dia, seg-sex, 06:00~19:00 BRT) ───────────────────────────
+    # Distribuídas a cada ~80 min para cobrir a janela operacional
+    - cron: "0 9 * * 1-5"     # 06:00 BRT
+    - cron: "30 10 * * 1-5"   # 07:30 BRT
+    - cron: "30 11 * * 1-5"   # 08:30 BRT
+    - cron: "30 12 * * 1-5"   # 09:30 BRT
+    - cron: "0 14 * * 1-5"    # 11:00 BRT
+    - cron: "30 15 * * 1-5"   # 12:30 BRT
+    - cron: "0 17 * * 1-5"    # 14:00 BRT
+    - cron: "30 18 * * 1-5"   # 15:30 BRT
+    - cron: "0 20 * * 1-5"    # 17:00 BRT
+    - cron: "0 22 * * 1-5"    # 19:00 BRT
+
+    # ── COMPORTAMENTO (1x/dia, seg-sex, 20:00 BRT = 23:00 UTC) ──────────────
+    - cron: "0 23 * * 1-5"
+
+  # ── Disparo manual (Actions → Run workflow) ─────────────────────────────
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "Tabela a sincronizar"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - cadastro
+          - status
+          - comportamento
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Evita warning de Node.js 20
+
+jobs:
+  sync:
+    name: "Sync • ${{ github.event.inputs.modo || 'schedule' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+
+      # ── 2. Python ──────────────────────────────────────────────────────────
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # ── 3. Dependências ────────────────────────────────────────────────────
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      # ── 4. Determinar modo ─────────────────────────────────────────────────
+      # Manual  → usa o modo escolhido pelo usuário
+      # Schedule → detecta pelo horário UTC atual:
+      #   10:00 UTC → cadastro
+      #   23:00 UTC → comportamento
+      #   demais   → status
+      - name: Determinar modo de execução
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "MODO=${{ github.event.inputs.modo }}" >> $GITHUB_ENV
+          else
+            HORA_UTC=$(date -u +%H)
+            MIN_UTC=$(date -u +%M)
+            if [ "$HORA_UTC" = "10" ] && [ "$MIN_UTC" = "00" ]; then
+              echo "MODO=cadastro" >> $GITHUB_ENV
+            elif [ "$HORA_UTC" = "23" ]; then
+              echo "MODO=comportamento" >> $GITHUB_ENV
+            else
+              echo "MODO=status" >> $GITHUB_ENV
+            fi
+          fi
+
+      # ── 5. Executar sync ───────────────────────────────────────────────────
+      - name: "Executar geotab_supabase.py (${{ env.MODO }})"
+        env:
+          GEOTAB_SERVIDOR:  ${{ secrets.GEOTAB_SERVIDOR }}
+          GEOTAB_DATABASE:  ${{ secrets.GEOTAB_DATABASE }}
+          GEOTAB_USERNAME:  ${{ secrets.GEOTAB_USERNAME }}
+          GEOTAB_PASSWORD:  ${{ secrets.GEOTAB_PASSWORD }}
+          SUPABASE_HOST:    ${{ secrets.SUPABASE_HOST }}
+          SUPABASE_PORTA:   ${{ secrets.SUPABASE_PORTA }}
+          SUPABASE_BANCO:   ${{ secrets.SUPABASE_BANCO }}
+          SUPABASE_USUARIO: ${{ secrets.SUPABASE_USUARIO }}
+          SUPABASE_SENHA:   ${{ secrets.SUPABASE_SENHA }}
+        run: python geotab_supabase.py ${{ env.MODO }}
+
+      # ── 6. Upload do log (retido 7 dias) ───────────────────────────────────
+      - name: Upload log de execução
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: geotab-sync-log-${{ github.run_number }}
+          path: geotab_sync.log
+          retention-days: 7
