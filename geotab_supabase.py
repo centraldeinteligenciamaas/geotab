@@ -50,14 +50,11 @@ MODO = sys.argv[1] if len(sys.argv) > 1 else "all"
 
 # Diagnósticos de odômetro testados em ordem de prioridade.
 # O primeiro que retornar dados para a frota será usado.
-# Tupla: (id_diagnóstico, fator_de_conversão)
-#   - fator 1    → valor já em km (OBD2 via protocolo CAN)
-#   - fator 1000 → valor em metros (GPS acumulado pelo device)
+# Todos retornam valores em metros → divisor 1000 para converter em km.
 DIAG_ODO_CANDIDATOS = [
-    ("DiagnosticOdometerInKilometersId", 1),       # OBD km — odômetro físico real
-    ("DiagnosticDeviceTotalDistanceId",  1000),    # GPS metros — distância desde instalação
-    ("DiagnosticOdometerAdjustmentId",   1000),
-    ("DiagnosticOdometer",               1000),
+    ("DiagnosticDeviceTotalDistanceId", 1000),
+    ("DiagnosticOdometerAdjustmentId",  1000),
+    ("DiagnosticOdometer",              1000),
 ]
 
 
