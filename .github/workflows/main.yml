@@ -19,7 +19,7 @@ name: Geotab Supabase Sync
     - cron: "0 10 * * 1-5"
 
     # STATUS: 10x/dia, seg-sex, 06:00 ~ 19:00 BRT
-    - cron: "0 9 * * 1-5"
+    - cron: "0 8 * * 1-5"
     - cron: "30 10 * * 1-5"
     - cron: "30 11 * * 1-5"
     - cron: "30 12 * * 1-5"
@@ -27,8 +27,8 @@ name: Geotab Supabase Sync
     - cron: "30 15 * * 1-5"
     - cron: "0 17 * * 1-5"
     - cron: "30 18 * * 1-5"
-    - cron: "0 20 * * 1-5"
-    - cron: "0 22 * * 1-5"
+    
+    
 
     # COMPORTAMENTO: 1x/dia, seg-sex, 20:00 BRT (23:00 UTC)
     - cron: "0 23 * * 1-5"
