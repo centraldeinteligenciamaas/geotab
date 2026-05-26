@@ -460,6 +460,7 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
     Se nenhum funcionar nos 30 dias, tenta um fallback de 1 ano para cada.
     """
     def _consultar(diag_id, ini, fim):
+        # resultsLimit fora do search → Geotab retorna DESC (mais recente primeiro)
         return multicall_em_lotes(credentials, [
             {
                 "method": "Get",
@@ -471,6 +472,7 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
                         "fromDate": ini.strftime(FMT),
                         "toDate":   fim.strftime(FMT),
                     },
+                    "resultsLimit": 1,
                 },
             }
             for did in lista_ids
@@ -481,8 +483,9 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
         for i, resultado in enumerate(resultados):
             did      = lista_ids[i]
             leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
-            odo = max((r.get("data") or 0 for r in leituras), default=0)
-            mapa[did] = round(odo / divisor, 2) if odo else 0
+            # Com resultsLimit=1 e ordem DESC, leituras[0] é o registro mais recente
+            valor = leituras[0].get("data", 0) if leituras else 0
+            mapa[did] = round((valor or 0) / divisor, 2)
         return mapa
 
     # ── Fase 1: testa cada candidato na janela de 30 dias ─────────────────
@@ -512,6 +515,7 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
                                 "fromDate": um_ano.strftime(FMT),
                                 "toDate":   data_inicio.strftime(FMT),
                             },
+                            "resultsLimit": 1,
                         },
                     }
                     for did in sem_odo
@@ -519,7 +523,7 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
                 for i, resultado in enumerate(res2):
                     did      = sem_odo[i]
                     leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
-                    odo = max((r.get("data") or 0 for r in leituras), default=0)
+                    odo = leituras[0].get("data", 0) if leituras else 0
                     if odo:
                         odo_map[did] = round(odo / divisor, 2)
                 recuperados = sum(1 for did in sem_odo if odo_map[did] > 0)
