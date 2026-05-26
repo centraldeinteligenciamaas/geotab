@@ -457,7 +457,6 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
     Se nenhum funcionar nos 30 dias, tenta um fallback de 1 ano para cada.
     """
     def _consultar(diag_id, ini, fim):
-        # resultsLimit fora do search → Geotab retorna DESC (mais recente primeiro)
         return multicall_em_lotes(credentials, [
             {
                 "method": "Get",
@@ -469,7 +468,6 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
                         "fromDate": ini.strftime(FMT),
                         "toDate":   fim.strftime(FMT),
                     },
-                    "resultsLimit": 1,
                 },
             }
             for did in lista_ids
@@ -480,9 +478,8 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
         for i, resultado in enumerate(resultados):
             did      = lista_ids[i]
             leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
-            # Com resultsLimit=1 e ordem DESC, leituras[0] é o registro mais recente
-            valor = leituras[0].get("data", 0) if leituras else 0
-            mapa[did] = round((valor or 0) / divisor, 2)
+            odo = max((r.get("data") or 0 for r in leituras), default=0)
+            mapa[did] = round(odo / divisor, 2) if odo else 0
         return mapa
 
     # ── Fase 1: testa cada candidato na janela de 30 dias ─────────────────
@@ -512,7 +509,6 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
                                 "fromDate": um_ano.strftime(FMT),
                                 "toDate":   data_inicio.strftime(FMT),
                             },
-                            "resultsLimit": 1,
                         },
                     }
                     for did in sem_odo
@@ -520,7 +516,7 @@ def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
                 for i, resultado in enumerate(res2):
                     did      = sem_odo[i]
                     leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
-                    odo = leituras[0].get("data", 0) if leituras else 0
+                    odo = max((r.get("data") or 0 for r in leituras), default=0)
                     if odo:
                         odo_map[did] = round(odo / divisor, 2)
                 recuperados = sum(1 for did in sem_odo if odo_map[did] > 0)
@@ -595,22 +591,44 @@ def extrair_comportamento(credentials):
         for i in range(0, 30)
     ]
 
-    # ── Sonda: loga diagnósticos disponíveis para ajudar debug de odômetro ─
-    if lista_ids:
-        amostra = geotab_get(credentials, "StatusData",
-            search={
-                "deviceSearch": {"id": lista_ids[0]},
-                "fromDate": (data_fim - timedelta(hours=48)).strftime(FMT),
-                "toDate":   data_fim.strftime(FMT),
+    # ── Sonda: mapeia diagnósticos disponíveis por placa (ajuda a achar o ID do odômetro real) ─
+    DIAGS_ODO_CONHECIDOS = {
+        "DiagnosticDeviceTotalDistanceId", "DiagnosticOdometerAdjustmentId",
+        "DiagnosticOdometer", "DiagnosticOdometerInKilometersId",
+    }
+    log.info("  • SONDA odômetro — diagnósticos por veículo (48h):")
+    amostra_ids = lista_ids[:10]  # limita a 10 veículos para não sobrecarregar
+    res_sonda = multicall_em_lotes(credentials, [
+        {
+            "method": "Get",
+            "params": {
+                "typeName": "StatusData",
+                "search": {
+                    "deviceSearch": {"id": did},
+                    "fromDate": (data_fim - timedelta(hours=48)).strftime(FMT),
+                    "toDate":   data_fim.strftime(FMT),
+                },
             },
-            resultsLimit=100,
-        )
-        diags = {}
-        for r in amostra:
+        }
+        for did in amostra_ids
+    ])
+    for i, resultado in enumerate(res_sonda):
+        did      = amostra_ids[i]
+        placa    = placa_map.get(did, did)
+        leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
+        diags_v  = {}
+        for r in leituras:
             did_diag = r.get("diagnostic", {}).get("id", "?")
-            if did_diag not in diags:
-                diags[did_diag] = r.get("data")
-        log.info(f"  • SONDA diagnósticos (48h, veículo {lista_ids[0]}): {diags}")
+            if did_diag not in diags_v:
+                diags_v[did_diag] = r.get("data")
+        # destaca diagnósticos de odômetro conhecidos
+        odo_diags = {k: v for k, v in diags_v.items() if k in DIAGS_ODO_CONHECIDOS}
+        outros    = {k: v for k, v in diags_v.items() if k not in DIAGS_ODO_CONHECIDOS}
+        if odo_diags:
+            km_vals = {k: round(v / 1000, 1) if v else 0 for k, v in odo_diags.items()}
+            log.info(f"    [{placa}] ODO: {km_vals}  |  outros diags: {len(outros)}")
+        else:
+            log.info(f"    [{placa}] nenhum diag de odômetro known. Todos: {list(diags_v.keys())[:8]}")
 
     # ── Odômetro: descobre automaticamente o diagnóstico correto ───────────
     odometro_map, diag_usado = buscar_odometro(
