@@ -15,16 +15,7 @@ name: Geotab Supabase Sync
           - comportamento
 
   schedule:
-    # CADASTRO: 1x/dia, seg-sex, 07:00 BRT (10:00 UTC)
-    - cron: "0 10 * * 1-5"
-
-    # STATUS: 10x/dia, seg-sex, 06:00 ~ 19:00 BRT
-    - cron: "0 6 * * 1-5"
-    - cron: "30 12 * * 1-5"
-    - cron: "30 18 * * 1-5"
-    
-    # COMPORTAMENTO: 1x/dia, seg-sex, 20:00 BRT (23:00 UTC)
-    - cron: "0 23 * * 1-5"
+     - cron: "0 6 * * 1-5"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
