@@ -601,47 +601,6 @@ def extrair_comportamento(credentials):
         for i in range(0, 30)
     ]
 
-    # ── Sonda: mostra todos os diagnósticos disponíveis por veículo (7 dias) ─
-    # Útil para identificar o ID correto do odômetro físico (OBD2) caso exista.
-    DIAGS_ODO_CONHECIDOS = {
-        "DiagnosticDeviceTotalDistanceId", "DiagnosticOdometerAdjustmentId",
-        "DiagnosticOdometer", "DiagnosticOdometerInKilometersId",
-    }
-    log.info("  • SONDA odômetro — todos os veículos (7 dias):")
-    sonda_ini = (data_fim - timedelta(days=7)).strftime(FMT)
-    sonda_fim = data_fim.strftime(FMT)
-    res_sonda = multicall_em_lotes(credentials, [
-        {
-            "method": "Get",
-            "params": {
-                "typeName": "StatusData",
-                "search": {
-                    "deviceSearch": {"id": did},
-                    "fromDate": sonda_ini,
-                    "toDate":   sonda_fim,
-                },
-            },
-        }
-        for did in lista_ids
-    ])
-    for i, resultado in enumerate(res_sonda):
-        did      = lista_ids[i]
-        placa    = placa_map.get(did, did)
-        leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
-        diags_v  = {}
-        for r in leituras:
-            did_diag = r.get("diagnostic", {}).get("id", "?")
-            if did_diag not in diags_v:
-                diags_v[did_diag] = r.get("data")
-        odo_diags = {k: v for k, v in diags_v.items() if k in DIAGS_ODO_CONHECIDOS}
-        if odo_diags:
-            # valores brutos → km (assume metros, divisão por 1000 apenas para exibição)
-            km_vals = {k: round((v or 0) / 1000, 1) for k, v in odo_diags.items()}
-            log.info(f"    [{placa}] {km_vals}")
-        else:
-            todos = list(diags_v.keys())
-            log.info(f"    [{placa}] sem diag ODO known — diags disponíveis: {todos[:10]}")
-
     # ── Odômetro GPS (distância acumulada pelo device desde instalação) ────────
     odo_gps_map = buscar_odo_gps(credentials, lista_ids, data_inicio, data_fim)
 
