@@ -30,6 +30,17 @@ def executar_sync(modo):
         _lock.release()
 
 
+@app.route("/")
+def index():
+    return jsonify({
+        "service": "geotab-sync",
+        "endpoints": {
+            "health": "/health",
+            "run":    "/run/<modo>  — modos: all, cadastro, status, comportamento",
+        },
+    })
+
+
 @app.route("/health")
 def health():
     return jsonify({
