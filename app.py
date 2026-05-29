@@ -17,16 +17,39 @@ log = logging.getLogger(__name__)
 API_KEY = os.environ.get("SYNC_API_KEY", "")
 _lock = threading.Lock()
 
+_historico = {
+    "em_execucao": False,
+    "modo_atual":  None,
+    "cadastro":     {"ultimo_inicio": None, "ultimo_fim": None, "ultimo_resultado": None},
+    "status":       {"ultimo_inicio": None, "ultimo_fim": None, "ultimo_resultado": None},
+    "comportamento":{"ultimo_inicio": None, "ultimo_fim": None, "ultimo_resultado": None},
+}
+
+
+def _registrar(modo, chave, valor):
+    modos = ["cadastro", "status", "comportamento"] if modo == "all" else [modo]
+    for m in modos:
+        _historico[m][chave] = valor
+
 
 def executar_sync(modo):
     if not _lock.acquire(blocking=False):
         log.warning(f"Sync já em execução — ignorando modo={modo}")
         return
+    _historico["em_execucao"] = True
+    _historico["modo_atual"]  = modo
+    inicio = datetime.now(tz=BRT).strftime("%Y-%m-%d %H:%M:%S")
+    _registrar(modo, "ultimo_inicio", inicio)
     try:
         sync_main(modo)
+        _registrar(modo, "ultimo_resultado", "sucesso")
     except Exception:
         log.exception(f"Erro durante sync modo={modo}")
+        _registrar(modo, "ultimo_resultado", "erro")
     finally:
+        _registrar(modo, "ultimo_fim", datetime.now(tz=BRT).strftime("%Y-%m-%d %H:%M:%S"))
+        _historico["em_execucao"] = False
+        _historico["modo_atual"]  = None
         _lock.release()
 
 
@@ -36,6 +59,7 @@ def index():
         "service": "geotab-sync",
         "endpoints": {
             "health": "/health",
+            "status": "/status",
             "run":    "/run/<modo>  — modos: all, cadastro, status, comportamento",
         },
     })
@@ -46,6 +70,25 @@ def health():
     return jsonify({
         "status": "ok",
         "hora_brt": datetime.now(tz=BRT).strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
+
+@app.route("/status")
+def status():
+    proximos = {
+        job.id: job.next_run_time.astimezone(BRT).strftime("%Y-%m-%d %H:%M:%S")
+        for job in scheduler.get_jobs()
+        if job.next_run_time
+    }
+    return jsonify({
+        "em_execucao": _historico["em_execucao"],
+        "modo_atual":  _historico["modo_atual"],
+        "ultima_execucao": {
+            "cadastro":      _historico["cadastro"],
+            "status":        _historico["status"],
+            "comportamento": _historico["comportamento"],
+        },
+        "proximas_execucoes_brt": proximos,
     })
 
 
