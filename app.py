@@ -7,8 +7,9 @@ from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import text
 
-from geotab_supabase import main as sync_main
+from geotab_supabase import main as sync_main, criar_engine
 
 app = Flask(__name__)
 BRT = ZoneInfo("America/Sao_Paulo")
@@ -17,39 +18,28 @@ log = logging.getLogger(__name__)
 API_KEY = os.environ.get("SYNC_API_KEY", "")
 _lock = threading.Lock()
 
-_historico = {
+_estado = {
     "em_execucao": False,
     "modo_atual":  None,
-    "cadastro":     {"ultimo_inicio": None, "ultimo_fim": None, "ultimo_resultado": None},
-    "status":       {"ultimo_inicio": None, "ultimo_fim": None, "ultimo_resultado": None},
-    "comportamento":{"ultimo_inicio": None, "ultimo_fim": None, "ultimo_resultado": None},
+    "ultimo_erro": None,
 }
-
-
-def _registrar(modo, chave, valor):
-    modos = ["cadastro", "status", "comportamento"] if modo == "all" else [modo]
-    for m in modos:
-        _historico[m][chave] = valor
 
 
 def executar_sync(modo):
     if not _lock.acquire(blocking=False):
         log.warning(f"Sync já em execução — ignorando modo={modo}")
         return
-    _historico["em_execucao"] = True
-    _historico["modo_atual"]  = modo
-    inicio = datetime.now(tz=BRT).strftime("%Y-%m-%d %H:%M:%S")
-    _registrar(modo, "ultimo_inicio", inicio)
+    _estado["em_execucao"] = True
+    _estado["modo_atual"]  = modo
+    _estado["ultimo_erro"] = None
     try:
         sync_main(modo)
-        _registrar(modo, "ultimo_resultado", "sucesso")
-    except Exception:
+    except Exception as exc:
+        _estado["ultimo_erro"] = str(exc)
         log.exception(f"Erro durante sync modo={modo}")
-        _registrar(modo, "ultimo_resultado", "erro")
     finally:
-        _registrar(modo, "ultimo_fim", datetime.now(tz=BRT).strftime("%Y-%m-%d %H:%M:%S"))
-        _historico["em_execucao"] = False
-        _historico["modo_atual"]  = None
+        _estado["em_execucao"] = False
+        _estado["modo_atual"]  = None
         _lock.release()
 
 
@@ -75,19 +65,28 @@ def health():
 
 @app.route("/status")
 def status():
+    ult = {"cadastro": None, "status": None, "comportamento": None}
+    try:
+        engine = criar_engine()
+        with engine.connect() as conn:
+            ult["cadastro"]      = conn.execute(text("SELECT MAX(atualizado_em) FROM tb_cadastro")).scalar()
+            ult["status"]        = conn.execute(text("SELECT MAX(snapshot_em)   FROM tb_status")).scalar()
+            ult["comportamento"] = conn.execute(text("SELECT MAX(atualizado_em) FROM tb_comportamento")).scalar()
+        engine.dispose()
+    except Exception as exc:
+        log.error(f"Erro ao consultar últimas atualizações: {exc}")
+
     proximos = {
         job.id: job.next_run_time.astimezone(BRT).strftime("%Y-%m-%d %H:%M:%S")
         for job in scheduler.get_jobs()
         if job.next_run_time
     }
+
     return jsonify({
-        "em_execucao": _historico["em_execucao"],
-        "modo_atual":  _historico["modo_atual"],
-        "ultima_execucao": {
-            "cadastro":      _historico["cadastro"],
-            "status":        _historico["status"],
-            "comportamento": _historico["comportamento"],
-        },
+        "em_execucao": _estado["em_execucao"],
+        "modo_atual":  _estado["modo_atual"],
+        "ultimo_erro": _estado["ultimo_erro"],
+        "ultima_atualizacao_brt": {k: str(v) if v else None for k, v in ult.items()},
         "proximas_execucoes_brt": proximos,
     })
 
