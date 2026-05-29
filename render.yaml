@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: geotab-sync
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 600
+    healthCheckPath: /health
+    envVars:
+      - key: GEOTAB_SERVIDOR
+        sync: false
+      - key: GEOTAB_DATABASE
+        sync: false
+      - key: GEOTAB_USERNAME
+        sync: false
+      - key: GEOTAB_PASSWORD
+        sync: false
+      - key: SUPABASE_HOST
+        sync: false
+      - key: SUPABASE_PORTA
+        sync: false
+      - key: SUPABASE_BANCO
+        sync: false
+      - key: SUPABASE_USUARIO
+        sync: false
+      - key: SUPABASE_SENHA
+        sync: false
+      - key: SYNC_API_KEY
+        sync: false

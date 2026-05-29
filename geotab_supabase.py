@@ -46,15 +46,15 @@ SUPABASE = {
     "senha":   os.environ["SUPABASE_SENHA"],
 }
 
-MODO = sys.argv[1] if len(sys.argv) > 1 else "all"
+# GPS: acumulado pelo device Geotab desde a instalação — sempre em metros.
+DIAG_GPS = "DiagnosticDeviceTotalDistanceId"
 
-# Diagnósticos de odômetro testados em ordem de prioridade.
-# O primeiro que retornar dados para a frota será usado.
-# Todos retornam valores em metros → divisor 1000 para converter em km.
-DIAG_ODO_CANDIDATOS = [
-    ("DiagnosticDeviceTotalDistanceId", 1000),
-    ("DiagnosticOdometerAdjustmentId",  1000),
-    ("DiagnosticOdometer",              1000),
+# Odômetro físico via OBD2 — testados em ordem de prioridade.
+# Unidade inferida automaticamente: > 1_000_000 → metros (÷1000); caso contrário → km.
+DIAG_ODO_FISICO = [
+    "DiagnosticOdometerInKilometersId",
+    "DiagnosticOdometerAdjustmentId",
+    "DiagnosticOdometer",
 ]
 
 
@@ -64,10 +64,7 @@ DIAG_ODO_CANDIDATOS = [
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)s  %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("geotab_sync.log", encoding="utf-8"),
-    ],
+    handlers=[logging.StreamHandler()],
 )
 log = logging.getLogger(__name__)
 
@@ -86,8 +83,8 @@ def criar_engine():
         database=cfg["banco"],
         query={"sslmode": "require"},
     )
-    # pool_size=1 / max_overflow=0: cada run do GH Actions é um processo efêmero —
-    # não faz sentido manter pool grande. pool_pre_ping detecta conexões mortas.
+    # pool_size=1: syncs rodam sequencialmente (lock no app.py) — não há concorrência.
+    # pool_pre_ping detecta conexões mortas após períodos de inatividade no servidor.
     return create_engine(
         url,
         pool_pre_ping=True,
@@ -160,6 +157,7 @@ def criar_tabelas(engine):
             ultima_curva_drastica    TIMESTAMP,
             score_risco              INTEGER,
             odometro                 DOUBLE PRECISION,
+            odometro_gps             DOUBLE PRECISION,
             atualizado_em            TIMESTAMP
         );
     """
@@ -200,7 +198,8 @@ def criar_tabelas(engine):
     """
     migrar_colunas = """
         ALTER TABLE tb_comportamento
-            ADD COLUMN IF NOT EXISTS odometro DOUBLE PRECISION DEFAULT 0;
+            ADD COLUMN IF NOT EXISTS odometro     DOUBLE PRECISION DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS odometro_gps DOUBLE PRECISION DEFAULT 0;
         ALTER TABLE tb_status
             DROP COLUMN IF EXISTS odometro_inicio;
     """
@@ -446,90 +445,101 @@ def extrair_status(credentials):
 
 
 # ─────────────────────────────────────────────────────────
-# ODÔMETRO — descobre o diagnóstico correto automaticamente
+# ODÔMETRO — GPS e físico (OBD2)
 # ─────────────────────────────────────────────────────────
-def buscar_odometro(credentials, lista_ids, data_inicio, data_fim):
-    """
-    Testa cada entrada de DIAG_ODO_CANDIDATOS e retorna o mapa {device_id: km}
-    usando o primeiro diagnóstico que retornar dados para a frota.
-    Cada candidato é uma tupla (diag_id, divisor): divisor=1 para valores já em km,
-    divisor=1000 para valores em metros.
-    Se nenhum funcionar nos 30 dias, tenta um fallback de 1 ano para cada.
-    """
-    def _consultar(diag_id, ini, fim):
-        return multicall_em_lotes(credentials, [
-            {
-                "method": "Get",
-                "params": {
-                    "typeName": "StatusData",
-                    "search": {
-                        "deviceSearch":     {"id": did},
-                        "diagnosticSearch": {"id": diag_id},
-                        "fromDate": ini.strftime(FMT),
-                        "toDate":   fim.strftime(FMT),
-                    },
+def _inferir_km(valor_raw: float) -> float:
+    """Detecta a unidade do valor bruto e retorna km.
+    Regra: valores > 1_000_000 estão em metros (÷ 1000); abaixo disso já são km.
+    Cobertura: 1.000 km em metros = 1.000.000 → limiar justo para frotas comerciais."""
+    if not valor_raw:
+        return 0.0
+    return round(valor_raw / 1000, 2) if valor_raw > 1_000_000 else round(float(valor_raw), 2)
+
+
+def _consultar_diag(credentials, lista_ids, diag_id, ini, fim):
+    return multicall_em_lotes(credentials, [
+        {
+            "method": "Get",
+            "params": {
+                "typeName": "StatusData",
+                "search": {
+                    "deviceSearch":     {"id": did},
+                    "diagnosticSearch": {"id": diag_id},
+                    "fromDate": ini.strftime(FMT),
+                    "toDate":   fim.strftime(FMT),
                 },
-            }
-            for did in lista_ids
-        ])
+            },
+        }
+        for did in lista_ids
+    ])
 
-    def _extrair_mapa(resultados, divisor):
-        mapa = {}
-        for i, resultado in enumerate(resultados):
-            did      = lista_ids[i]
-            leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
-            odo = max((r.get("data") or 0 for r in leituras), default=0)
-            mapa[did] = round(odo / divisor, 2) if odo else 0
-        return mapa
 
-    # ── Fase 1: testa cada candidato na janela de 30 dias ─────────────────
-    for diag_id, divisor in DIAG_ODO_CANDIDATOS:
-        log.info(f"  • Tentando odômetro via '{diag_id}' (30 dias, divisor={divisor})...")
-        resultados  = _consultar(diag_id, data_inicio, data_fim)
-        odo_map     = _extrair_mapa(resultados, divisor)
-        encontrados = sum(1 for v in odo_map.values() if v > 0)
-        log.info(f"    → {encontrados}/{len(lista_ids)} veículos com dado")
+def _max_por_device(resultados, lista_ids):
+    """Extrai o valor máximo bruto (sem conversão) por device."""
+    mapa = {}
+    for i, resultado in enumerate(resultados):
+        did      = lista_ids[i]
+        leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
+        mapa[did] = max((r.get("data") or 0 for r in leituras), default=0)
+    return mapa
+
+
+def _com_fallback_ano(credentials, lista_ids, diag_id, data_inicio, mapa_raw):
+    """Para devices sem leitura nos 30 dias, busca no ano anterior."""
+    sem_dado = [did for did, v in mapa_raw.items() if not v]
+    if not sem_dado:
+        return
+    um_ano = data_inicio - timedelta(days=365)
+    res2   = _consultar_diag(credentials, sem_dado, diag_id, um_ano, data_inicio)
+    for i, resultado in enumerate(res2):
+        did      = sem_dado[i]
+        leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
+        v = max((r.get("data") or 0 for r in leituras), default=0)
+        if v:
+            mapa_raw[did] = v
+    recuperados = sum(1 for did in sem_dado if mapa_raw[did])
+    log.info(f"    → {recuperados}/{len(sem_dado)} recuperados no fallback 1 ano")
+
+
+def buscar_odo_gps(credentials, lista_ids, data_inicio, data_fim):
+    """Retorna {device_id: km} via GPS (DiagnosticDeviceTotalDistanceId).
+    Valores sempre em metros → divide por 1000."""
+    log.info(f"  • GPS odômetro via '{DIAG_GPS}'...")
+    resultados = _consultar_diag(credentials, lista_ids, DIAG_GPS, data_inicio, data_fim)
+    mapa_raw   = _max_por_device(resultados, lista_ids)
+    _com_fallback_ano(credentials, lista_ids, DIAG_GPS, data_inicio, mapa_raw)
+    mapa_km = {did: round(v / 1000, 2) if v else 0.0 for did, v in mapa_raw.items()}
+    com_dado = sum(1 for v in mapa_km.values() if v > 0)
+    log.info(f"    → {com_dado}/{len(lista_ids)} veículos com dado GPS")
+    return mapa_km
+
+
+def buscar_odo_fisico(credentials, lista_ids, data_inicio, data_fim):
+    """Retorna {device_id: km} via OBD2 (odômetro físico do veículo).
+    Testa DIAG_ODO_FISICO em ordem; unidade inferida automaticamente por _inferir_km."""
+    for diag_id in DIAG_ODO_FISICO:
+        log.info(f"  • Odômetro físico via '{diag_id}'...")
+        resultados = _consultar_diag(credentials, lista_ids, diag_id, data_inicio, data_fim)
+        mapa_raw   = _max_por_device(resultados, lista_ids)
+        _com_fallback_ano(credentials, lista_ids, diag_id, data_inicio, mapa_raw)
+
+        mapa_km     = {did: _inferir_km(v) for did, v in mapa_raw.items()}
+        encontrados = sum(1 for v in mapa_km.values() if v > 0)
+        log.info(f"    → {encontrados}/{len(lista_ids)} veículos com dado físico")
 
         if encontrados > 0:
-            log.info(f"  ✓ Diagnóstico de odômetro selecionado: '{diag_id}'")
+            # Loga amostra para validar unidade inferida
+            amostras = [(did, mapa_raw[did], mapa_km[did])
+                        for did, v in mapa_km.items() if v > 0][:3]
+            for did, raw, km in amostras:
+                unidade = "metros" if raw > 1_000_000 else "km"
+                log.info(f"    └ device {did}: raw={raw:.0f} ({unidade}) → {km} km")
+            log.info(f"  ✓ Diagnóstico físico selecionado: '{diag_id}'")
+            return mapa_km
 
-            # Fallback para veículos sem leitura nos 30 dias (busca 1 ano atrás)
-            sem_odo = [did for did, odo in odo_map.items() if odo == 0]
-            um_ano  = data_inicio - timedelta(days=365)
-            if sem_odo:
-                log.info(f"  • Fallback 1 ano para {len(sem_odo)} veículos sem dado...")
-                res2 = multicall_em_lotes(credentials, [
-                    {
-                        "method": "Get",
-                        "params": {
-                            "typeName": "StatusData",
-                            "search": {
-                                "deviceSearch":     {"id": did},
-                                "diagnosticSearch": {"id": diag_id},
-                                "fromDate": um_ano.strftime(FMT),
-                                "toDate":   data_inicio.strftime(FMT),
-                            },
-                        },
-                    }
-                    for did in sem_odo
-                ])
-                for i, resultado in enumerate(res2):
-                    did      = sem_odo[i]
-                    leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
-                    odo = max((r.get("data") or 0 for r in leituras), default=0)
-                    if odo:
-                        odo_map[did] = round(odo / divisor, 2)
-                recuperados = sum(1 for did in sem_odo if odo_map[did] > 0)
-                log.info(f"    → {recuperados}/{len(sem_odo)} recuperados no fallback")
-
-            return odo_map, diag_id
-
-    # ── Fase 2: nenhum diagnóstico funcionou ──────────────────────────────
-    diag_ids = [d for d, _ in DIAG_ODO_CANDIDATOS]
-    log.warning("  ⚠ Nenhum diagnóstico de odômetro retornou dados para esta frota!")
-    log.warning(f"  ⚠ Diagnósticos testados: {diag_ids}")
-    log.warning("  ⚠ Verifique o log da SONDA acima para identificar o ID correto e adicione-o em DIAG_ODO_CANDIDATOS.")
-    return {did: 0 for did in lista_ids}, None
+    log.warning(f"  ⚠ Nenhum diagnóstico OBD2 disponível: {DIAG_ODO_FISICO}")
+    log.warning("  ⚠ Verifique o log SONDA — odometro ficará 0 para todos os veículos.")
+    return {did: 0.0 for did in lista_ids}
 
 
 # ─────────────────────────────────────────────────────────
@@ -591,13 +601,15 @@ def extrair_comportamento(credentials):
         for i in range(0, 30)
     ]
 
-    # ── Sonda: mapeia diagnósticos disponíveis por placa (ajuda a achar o ID do odômetro real) ─
+    # ── Sonda: mostra todos os diagnósticos disponíveis por veículo (7 dias) ─
+    # Útil para identificar o ID correto do odômetro físico (OBD2) caso exista.
     DIAGS_ODO_CONHECIDOS = {
         "DiagnosticDeviceTotalDistanceId", "DiagnosticOdometerAdjustmentId",
         "DiagnosticOdometer", "DiagnosticOdometerInKilometersId",
     }
-    log.info("  • SONDA odômetro — diagnósticos por veículo (48h):")
-    amostra_ids = lista_ids[:10]  # limita a 10 veículos para não sobrecarregar
+    log.info("  • SONDA odômetro — todos os veículos (7 dias):")
+    sonda_ini = (data_fim - timedelta(days=7)).strftime(FMT)
+    sonda_fim = data_fim.strftime(FMT)
     res_sonda = multicall_em_lotes(credentials, [
         {
             "method": "Get",
@@ -605,15 +617,15 @@ def extrair_comportamento(credentials):
                 "typeName": "StatusData",
                 "search": {
                     "deviceSearch": {"id": did},
-                    "fromDate": (data_fim - timedelta(hours=48)).strftime(FMT),
-                    "toDate":   data_fim.strftime(FMT),
+                    "fromDate": sonda_ini,
+                    "toDate":   sonda_fim,
                 },
             },
         }
-        for did in amostra_ids
+        for did in lista_ids
     ])
     for i, resultado in enumerate(res_sonda):
-        did      = amostra_ids[i]
+        did      = lista_ids[i]
         placa    = placa_map.get(did, did)
         leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
         diags_v  = {}
@@ -621,24 +633,20 @@ def extrair_comportamento(credentials):
             did_diag = r.get("diagnostic", {}).get("id", "?")
             if did_diag not in diags_v:
                 diags_v[did_diag] = r.get("data")
-        # destaca diagnósticos de odômetro conhecidos
         odo_diags = {k: v for k, v in diags_v.items() if k in DIAGS_ODO_CONHECIDOS}
-        outros    = {k: v for k, v in diags_v.items() if k not in DIAGS_ODO_CONHECIDOS}
         if odo_diags:
-            km_vals = {k: round(v / 1000, 1) if v else 0 for k, v in odo_diags.items()}
-            log.info(f"    [{placa}] ODO: {km_vals}  |  outros diags: {len(outros)}")
+            # valores brutos → km (assume metros, divisão por 1000 apenas para exibição)
+            km_vals = {k: round((v or 0) / 1000, 1) for k, v in odo_diags.items()}
+            log.info(f"    [{placa}] {km_vals}")
         else:
-            log.info(f"    [{placa}] nenhum diag de odômetro known. Todos: {list(diags_v.keys())[:8]}")
+            todos = list(diags_v.keys())
+            log.info(f"    [{placa}] sem diag ODO known — diags disponíveis: {todos[:10]}")
 
-    # ── Odômetro: descobre automaticamente o diagnóstico correto ───────────
-    odometro_map, diag_usado = buscar_odometro(
-        credentials, lista_ids, data_inicio, data_fim
-    )
-    log.info(
-        f"  • Odômetros: {sum(1 for v in odometro_map.values() if v > 0)}"
-        f"/{len(lista_ids)} veículos com dado "
-        f"(diagnóstico: {diag_usado})"
-    )
+    # ── Odômetro GPS (distância acumulada pelo device desde instalação) ────────
+    odo_gps_map = buscar_odo_gps(credentials, lista_ids, data_inicio, data_fim)
+
+    # ── Odômetro físico (OBD2 — odômetro real do veículo, se disponível) ───
+    odo_fisico_map = buscar_odo_fisico(credentials, lista_ids, data_inicio, data_fim)
 
     # ── Contadores de eventos ───────────────────────────────────────────────
     contadores = {
@@ -741,7 +749,8 @@ def extrair_comportamento(credentials):
             "ultima_fren_brusca":      ts_brt(c["ultima_frenagem"]),
             "ultima_curva_drastica":   ts_brt(c["ultima_curva"]),
             "score_risco":             ev * 3 + ac * 2 + fr * 2 + cu * 1,
-            "odometro":                odometro_map.get(did, 0),
+            "odometro":                odo_fisico_map.get(did, 0),
+            "odometro_gps":            odo_gps_map.get(did, 0),
             "atualizado_em":           agora_brt(),
         })
 
@@ -753,9 +762,12 @@ def extrair_comportamento(credentials):
 # ─────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────
-def main():
+def main(modo=None):
+    if modo is None:
+        modo = sys.argv[1] if len(sys.argv) > 1 else "all"
+
     log.info(f"{'='*55}")
-    log.info(f"  Geotab → Supabase  |  modo: {MODO}")
+    log.info(f"  Geotab → Supabase  |  modo: {modo}")
     log.info(f"{'='*55}")
 
     engine = criar_engine()
@@ -765,15 +777,15 @@ def main():
     log.info("  ✓ Autenticado no Geotab\n")
 
     try:
-        if MODO in ("all", "cadastro"):
+        if modo in ("all", "cadastro"):
             df = extrair_cadastro(credentials)
             gravar_tabela(df, "tb_cadastro", engine, chave_upsert="id")
 
-        if MODO in ("all", "status"):
+        if modo in ("all", "status"):
             df = extrair_status(credentials)
             gravar_tabela(df, "tb_status", engine, chave_upsert="id")
 
-        if MODO in ("all", "comportamento"):
+        if modo in ("all", "comportamento"):
             df = extrair_comportamento(credentials)
             gravar_tabela(df, "tb_comportamento", engine, chave_upsert="id")
 
