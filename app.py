@@ -50,9 +50,19 @@ def index():
         "endpoints": {
             "health": "/health",
             "status": "/status",
-            "run":    "/run/<modo>  — modos: all, cadastro, status, comportamento, viagens",
+            "run":    "/run/<modo>",
         },
-        "obs": "viagens NÃO entra no 'all' — rode /run/viagens separadamente (job diário às 21h BRT)",
+        "comandos_manuais": {
+            "cadastro":      "/run/cadastro",
+            "status":        "/run/status",
+            "comportamento": "/run/comportamento",
+            "viagens":       "/run/viagens",
+        },
+        "obs": (
+            "Rode UMA tabela por vez. NÃO use /run/all — processar tudo no mesmo "
+            "processo estoura a RAM do free tier. Cada tabela tem job diário próprio "
+            "em horário separado (cadastro 04h, status 05h, comportamento 06h, viagens 21h BRT)."
+        ),
     })
 
 
@@ -110,36 +120,25 @@ def run_sync(modo):
 # ─────────────────────────────────────────────────────────
 # AGENDAMENTOS (horários em BRT, seg-sex)
 # ─────────────────────────────────────────────────────────
+# Cada tabela roda 1x/dia em horário SEPARADO. NUNCA usamos 'all' aqui: rodar
+# tudo no mesmo processo estoura a RAM do free tier (512 MB). Os horários têm
+# folga entre si para nunca haver dois syncs simultâneos (o _lock já impede
+# concorrência, mas o espaçamento evita disputa de memória).
 scheduler = BackgroundScheduler(timezone=BRT)
 
-# Cadastro: 07:00 BRT
-scheduler.add_job(
-    lambda: executar_sync("cadastro"),
-    CronTrigger(hour=7, minute=0, day_of_week="mon-fri", timezone=BRT),
-    id="cadastro",
-)
-
-# Status: 06:00, 12:30, 18:30 BRT
-for _hora, _minuto in [(6, 0), (12, 30), (18, 30)]:
+# (modo, hora, minuto) — um job por tabela, 1x ao dia.
+AGENDA = [
+    ("cadastro",      4, 0),   # 04:00 — leve
+    ("status",        5, 0),   # 05:00 — leve
+    ("comportamento", 6, 0),   # 06:00 — pesado (eventos 30d + odômetro)
+    ("viagens",      21, 0),   # 21:00 — mais pesado (Trips por device + geocode)
+]
+for _modo, _hora, _minuto in AGENDA:
     scheduler.add_job(
-        lambda: executar_sync("status"),
+        lambda m=_modo: executar_sync(m),
         CronTrigger(hour=_hora, minute=_minuto, day_of_week="mon-fri", timezone=BRT),
-        id=f"status_{_hora}h{_minuto:02d}",
+        id=_modo,
     )
-
-# Comportamento: 20:00 BRT
-scheduler.add_job(
-    lambda: executar_sync("comportamento"),
-    CronTrigger(hour=20, minute=0, day_of_week="mon-fri", timezone=BRT),
-    id="comportamento",
-)
-
-# Viagens: 21:00 BRT — job ISOLADO (não faz parte do 'all')
-scheduler.add_job(
-    lambda: executar_sync("viagens"),
-    CronTrigger(hour=21, minute=0, day_of_week="mon-fri", timezone=BRT),
-    id="viagens",
-)
 
 scheduler.start()
 

@@ -662,10 +662,6 @@ def extrair_comportamento(credentials):
 
     data_fim    = agora_brt()
     data_inicio = data_fim - timedelta(days=30)
-    janelas     = [
-        (data_inicio + timedelta(days=i), data_inicio + timedelta(days=i + 1))
-        for i in range(0, 30)
-    ]
 
     # ── Odômetro GPS (distância acumulada pelo device desde instalação) ────────
     odo_gps_map = buscar_odo_gps(credentials, lista_ids, data_inicio, data_fim)
@@ -710,9 +706,16 @@ def extrair_comportamento(credentials):
                     contadores[did][chave_ultimo] = data_ev
         return contados, ignorados
 
-    LIMIT = 50000
+    # Teto por chamada da Geotab. Quando atingido, a janela é fracionada — assim
+    # NENHUM evento é perdido (contagem completa) e cada chamada continua leve.
+    LIMIT     = 50000
+    MIN_JANELA = timedelta(minutes=5)  # piso do fracionamento recursivo
 
-    def buscar_eventos(credentials, rid, ini, fim):
+    def contar_regra(rid, tipo, chave_ultimo, ini, fim):
+        """Conta TODOS os eventos da regra em [ini, fim].
+        Se a janela satura (>= LIMIT eventos = sinal de truncamento), divide pela
+        metade e recursa — garantindo a contagem completa sem nunca segurar mais
+        que uma sub-janela em memória. Retorna (total, contados, ignorados)."""
         eventos = geotab_get(
             credentials, "ExceptionEvent",
             search={
@@ -722,25 +725,33 @@ def extrair_comportamento(credentials):
             },
             resultsLimit=LIMIT,
         )
-        if len(eventos) >= LIMIT:
-            log.warning(
-                f"  ⚠ Limite {LIMIT} atingido na janela {ini.date()}–{fim.date()} "
-                f"(regra {rid}) — contagem pode estar incompleta"
-            )
-        return eventos
+        n = len(eventos)
 
-    # Velocidade (todas as regras, todas as janelas).
-    # Cada janela pode trazer até LIMIT eventos — processa e descarta na hora
-    # (del + gc) para não acumular dezenas de milhares de dicts em memória.
+        if n >= LIMIT and (fim - ini) > MIN_JANELA:
+            # Saturou: libera esta leitura e fraciona a janela pela metade.
+            del eventos
+            gc.collect()
+            meio = ini + (fim - ini) / 2
+            t1, c1, i1 = contar_regra(rid, tipo, chave_ultimo, ini, meio)
+            t2, c2, i2 = contar_regra(rid, tipo, chave_ultimo, meio, fim)
+            return t1 + t2, c1 + c2, i1 + i2
+
+        if n >= LIMIT:
+            log.warning(
+                f"  ⚠ Janela mínima {ini:%Y-%m-%d %H:%M}–{fim:%H:%M} ainda saturada "
+                f"({n} eventos, regra {rid}) — caso extremo, reduza MIN_JANELA"
+            )
+        c, i = processar_eventos(eventos, tipo, chave_ultimo)
+        del eventos
+        return n, c, i
+
+    # Velocidade (todas as regras) — fracionamento adaptativo sobre os 30 dias.
     total_vel, contados_vel, ignorados_vel = 0, 0, 0
     for rid in ids_velocidade:
-        for ini, fim in janelas:
-            eventos = buscar_eventos(credentials, rid, ini, fim)
-            total_vel += len(eventos)
-            c, i = processar_eventos(eventos, "excesso_velocidade", "ultimo_excesso")
-            contados_vel += c
-            ignorados_vel += i
-            del eventos
+        t, c, i = contar_regra(rid, "excesso_velocidade", "ultimo_excesso", data_inicio, data_fim)
+        total_vel += t
+        contados_vel += c
+        ignorados_vel += i
         gc.collect()
     log.info(f"  • excesso_velocidade: {total_vel} eventos ({contados_vel} atribuídos, {ignorados_vel} sem match)")
 
@@ -749,16 +760,9 @@ def extrair_comportamento(credentials):
         if not rid:
             log.warning(f"  • Regra '{tipo}' não encontrada — pulando")
             continue
-        total, contados_total, ignorados_total = 0, 0, 0
-        for ini, fim in janelas:
-            eventos = buscar_eventos(credentials, rid, ini, fim)
-            total += len(eventos)
-            c, i = processar_eventos(eventos, tipo, CAMPO_ULTIMO[tipo])
-            contados_total += c
-            ignorados_total += i
-            del eventos
+        t, c, i = contar_regra(rid, tipo, CAMPO_ULTIMO[tipo], data_inicio, data_fim)
         gc.collect()
-        log.info(f"  • {tipo}: {total} eventos ({contados_total} atribuídos, {ignorados_total} sem match)")
+        log.info(f"  • {tipo}: {t} eventos ({c} atribuídos, {i} sem match)")
 
     rows = []
     for did in lista_ids:
