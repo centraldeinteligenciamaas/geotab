@@ -139,8 +139,8 @@ def criar_tabelas(engine):
             motorista_nome   TEXT,
             motorista_email  TEXT,
             motorista_tel    TEXT,
+            motorista_matricula TEXT,
             viagem_inicio    TIMESTAMP,
-            viagem_fim       TIMESTAMP,
             snapshot_em      TIMESTAMP
         );
 
@@ -161,6 +161,41 @@ def criar_tabelas(engine):
             odometro_gps             DOUBLE PRECISION,
             atualizado_em            TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS tb_viagens (
+            id                  TEXT PRIMARY KEY,   -- device_id + '|' + start (chave estável da viagem)
+            device_id           TEXT,
+            serial              TEXT,
+            placa               TEXT,
+            veiculo             TEXT,
+            -- hierarquia organizacional (igual ao cadastro: UO / Gerência / Superintendência)
+            grupo               TEXT,
+            todos_grupos        TEXT,
+            -- janela da viagem
+            data_partida        TIMESTAMP,
+            data_chegada        TIMESTAMP,
+            duracao_segundos    INTEGER,
+            -- métricas
+            distancia_km        DOUBLE PRECISION,
+            hodometro_inicial   DOUBLE PRECISION,
+            hodometro_final     DOUBLE PRECISION,
+            velocidade_media    DOUBLE PRECISION,
+            velocidade_maxima   DOUBLE PRECISION,
+            -- endereços (reverse-geocode via GetAddresses)
+            end_partida         TEXT,
+            end_chegada         TEXT,
+            lat_partida         DOUBLE PRECISION,
+            lon_partida         DOUBLE PRECISION,
+            lat_chegada         DOUBLE PRECISION,
+            lon_chegada         DOUBLE PRECISION,
+            -- motorista
+            motorista_id        TEXT,
+            motorista_nome      TEXT,
+            motorista_matricula TEXT,
+            atualizado_em       TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS ix_viagens_device  ON tb_viagens (device_id);
+        CREATE INDEX IF NOT EXISTS ix_viagens_partida ON tb_viagens (data_partida);
     """
     # Migra colunas existentes de TIMESTAMPTZ → TIMESTAMP (converte UTC → BRT)
     migrar = """
@@ -202,9 +237,10 @@ def criar_tabelas(engine):
             ADD COLUMN IF NOT EXISTS odometro     DOUBLE PRECISION DEFAULT 0,
             ADD COLUMN IF NOT EXISTS odometro_gps DOUBLE PRECISION DEFAULT 0;
         ALTER TABLE tb_status
-            ADD COLUMN IF NOT EXISTS viagem_fim TIMESTAMP;
-        ALTER TABLE tb_status
             DROP COLUMN IF EXISTS odometro_inicio;
+        -- matrícula do motorista (employeeNo) também na visão de status em tempo real
+        ALTER TABLE tb_status
+            ADD COLUMN IF NOT EXISTS motorista_matricula TEXT;
     """
     def _executar():
         with engine.begin() as conn:
@@ -300,17 +336,13 @@ def geotab_get(credentials, typeName, search=None, resultsLimit=None):
 def multicall(credentials, chamadas):
     if not chamadas:
         return []
-    try:
-        resp = requests.post(
-            GEOTAB["servidor"],
-            json={
-                "method": "ExecuteMultiCall",
-                "params": {"credentials": credentials, "calls": chamadas},
-            },
-        ).json()
-    except Exception as exc:
-        log.warning(f"Erro ao decodificar resposta do MultiCall: {exc}")
-        return []
+    resp = requests.post(
+        GEOTAB["servidor"],
+        json={
+            "method": "ExecuteMultiCall",
+            "params": {"credentials": credentials, "calls": chamadas},
+        },
+    ).json()
     if "error" in resp:
         log.warning(f"Erro no MultiCall: {resp['error']}")
         return []
@@ -400,43 +432,14 @@ def extrair_status(credentials):
     driver_ids = set()
     for i, resultado in enumerate(res_viagens):
         did     = lista_ids[i]
-        raw = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
-        # Filtra apenas dicts válidos — a API pode retornar strings ou erros inline.
-        viagens = [v for v in raw if isinstance(v, dict)]
-        if not viagens:
-            continue
-
-        # A API da Geotab SEMPRE preenche "stop" (estimativa) mesmo em viagens em
-        # andamento, então filtrar por "not stop" não funciona. O critério correto:
-        # uma viagem CONCLUÍDA tem stopDurationTicks > 0; uma viagem ATIVA tem
-        # stopDurationTicks == 0 (ou ausente). Ordena por "start" (mais recente
-        # primeiro) para garantir que pegamos a viagem corrente.
-        viagens_ord = sorted(viagens, key=lambda v: v.get("start") or "", reverse=True)
-
-        # Prioriza a viagem ativa (em andamento); se não houver, usa a mais recente
-        # concluída — assim a tabela ainda mostra início e fim do último deslocamento.
-        viagem = next(
-            (v for v in viagens_ord if not v.get("stopDurationTicks")),
-            viagens_ord[0],
-        )
-
-        # "driver" pode vir como dict {"id": "b1"} ou como string "NoDriver".
-        driver_raw = viagem.get("driver")
-        if isinstance(driver_raw, dict):
-            driver_id = driver_raw.get("id") or ""
-        elif isinstance(driver_raw, str):
-            driver_id = driver_raw
-        else:
-            driver_id = ""
-
-        motoristas_ativos[did] = {
-            "driver_id":     driver_id,
-            "viagem_inicio": viagem.get("start"),
-            "viagem_fim":    viagem.get("stop"),
-            "viagem_ativa":  not viagem.get("stopDurationTicks"),
-        }
-        if driver_id and driver_id not in ("NoDriver", "UnknownDriverId"):
-            driver_ids.add(driver_id)
+        viagens = resultado if isinstance(resultado, list) else resultado.get("result", [])
+        viagem  = next((v for v in viagens if not v.get("stop")), None)
+        if viagem and viagem.get("driver", {}).get("id"):
+            motoristas_ativos[did] = {
+                "driver_id":     viagem["driver"]["id"],
+                "viagem_inicio": viagem.get("start"),
+            }
+            driver_ids.add(viagem["driver"]["id"])
 
     info_motoristas = {}
     if driver_ids:
@@ -451,6 +454,7 @@ def extrair_status(credentials):
                     "nome":     u.get("name", "Desconhecido"),
                     "email":    u.get("email", ""),
                     "telefone": u.get("phone", ""),
+                    "matricula": u.get("employeeNo", ""),
                 }
 
     rows = []
@@ -471,8 +475,8 @@ def extrair_status(credentials):
             "motorista_nome":  mot.get("nome", "Nenhum"),
             "motorista_email": mot.get("email", ""),
             "motorista_tel":   mot.get("telefone", ""),
+            "motorista_matricula": mot.get("matricula", ""),
             "viagem_inicio":   ts_brt(viagem.get("viagem_inicio") if viagem else None),
-            "viagem_fim":      ts_brt(viagem.get("viagem_fim") if viagem else None),
             "snapshot_em":     agora_brt(),
         })
 
@@ -756,6 +760,240 @@ def extrair_comportamento(credentials):
 
 
 # ─────────────────────────────────────────────────────────
+# TABELA 4 — VIAGENS  (base do Relatório de Viagem estilo SANEAGO)
+# ─────────────────────────────────────────────────────────
+# Quantos dias de viagens trazer por execução. O upsert por chave estável
+# (device|start) garante que reprocessar o mesmo período não duplica linhas.
+VIAGENS_DIAS = int(os.environ.get("VIAGENS_DIAS", 30))
+
+
+def _coord(ponto):
+    """Extrai (lat, lon) de um StopPoint/Coordinate da Geotab. Campos: x=lon, y=lat."""
+    if not isinstance(ponto, dict):
+        return None, None
+    lat = ponto.get("y")
+    lon = ponto.get("x")
+    return lat, lon
+
+
+def reverse_geocode(credentials, coordenadas):
+    """Converte uma lista de (lat, lon) em endereços via GetAddresses da Geotab.
+    Retorna lista de strings alinhada à entrada. Coordenadas inválidas → ''.
+    A chamada é feita em lotes para respeitar limites do servidor."""
+    if not coordenadas:
+        return []
+
+    # Monta a lista de coordenadas no formato esperado (x=lon, y=lat),
+    # guardando o índice original para remontar a saída alinhada.
+    pedidos, indices = [], []
+    for i, (lat, lon) in enumerate(coordenadas):
+        if lat in (None, 0) and lon in (None, 0):
+            continue
+        if lat is None or lon is None:
+            continue
+        pedidos.append({"x": lon, "y": lat})
+        indices.append(i)
+
+    enderecos = [""] * len(coordenadas)
+    if not pedidos:
+        return enderecos
+
+    LOTE = 100
+    for ini in range(0, len(pedidos), LOTE):
+        sub_pedidos = pedidos[ini:ini + LOTE]
+        sub_indices = indices[ini:ini + LOTE]
+        try:
+            resp = requests.post(
+                GEOTAB["servidor"],
+                json={
+                    "method": "GetAddresses",
+                    "params": {
+                        "credentials": credentials,
+                        "coordinates": sub_pedidos,
+                    },
+                },
+            ).json()
+        except Exception as exc:
+            log.warning(f"  ⚠ Falha no GetAddresses (lote {ini}): {exc}")
+            continue
+        if "error" in resp:
+            log.warning(f"  ⚠ Erro no GetAddresses: {resp['error']}")
+            continue
+        for j, addr in enumerate(resp.get("result", [])):
+            if j < len(sub_indices):
+                enderecos[sub_indices[j]] = (addr or {}).get("formattedAddress", "")
+    return enderecos
+
+
+def extrair_viagens(credentials):
+    """Extrai viagens (Trip) dos últimos VIAGENS_DIAS dias para a base do
+    Relatório de Viagem. Uma linha por viagem concluída, com motorista,
+    matrícula, hodômetro inicial/final, distância, velocidade e endereços."""
+    log.info(f"Extraindo viagens dos últimos {VIAGENS_DIAS} dias...")
+
+    veiculos   = geotab_get(credentials, "Device")
+    lista_ids  = [v.get("id") for v in veiculos]
+    serial_map = {v.get("id"): v.get("serialNumber", "") for v in veiculos}
+    placa_map  = {v.get("id"): v.get("licensePlate", "") for v in veiculos}
+    nome_map   = {v.get("id"): v.get("name", "")          for v in veiculos}
+
+    # Hierarquia de grupos (UO / Gerência / Superintendência) — igual ao cadastro.
+    grupos = {g.get("id"): g.get("name", "") for g in geotab_get(credentials, "Group")}
+    grupo_map, grupos_todos_map = {}, {}
+    for v in veiculos:
+        gnomes = [grupos.get(g.get("id"), g.get("id")) for g in v.get("groups", [])]
+        grupo_map[v.get("id")]        = gnomes[-1] if gnomes else ""
+        grupos_todos_map[v.get("id")] = " | ".join(gnomes)
+
+    data_fim    = agora_brt()
+    data_inicio = data_fim - timedelta(days=VIAGENS_DIAS)
+
+    # Busca viagens por device (multicall em lotes — uma chamada Trip por veículo).
+    resultados = multicall_em_lotes(credentials, [
+        {
+            "method": "Get",
+            "params": {
+                "typeName": "Trip",
+                "search": {
+                    "deviceSearch": {"id": did},
+                    "fromDate": data_inicio.strftime(FMT),
+                    "toDate":   data_fim.strftime(FMT),
+                },
+            },
+        }
+        for did in lista_ids
+    ])
+
+    # ── Coleta de motoristas referenciados (para resolver nome + matrícula) ──
+    driver_ids = set()
+    viagens_por_device = {}
+    for i, resultado in enumerate(resultados):
+        did = lista_ids[i]
+        raw = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
+        viagens = [v for v in raw if isinstance(v, dict)]
+        # Ordena por início (mais antigo primeiro) para calcular hodômetro inicial.
+        viagens.sort(key=lambda v: v.get("start") or "")
+        viagens_por_device[did] = viagens
+        for v in viagens:
+            drv = v.get("driver")
+            if isinstance(drv, dict) and drv.get("id"):
+                driver_ids.add(drv["id"])
+            elif isinstance(drv, str) and drv not in ("NoDriver", "UnknownDriverId"):
+                driver_ids.add(drv)
+
+    info_motoristas = {}
+    if driver_ids:
+        for res in multicall(credentials, [
+            {"method": "Get", "params": {"typeName": "User", "search": {"id": did}}}
+            for did in driver_ids
+        ]):
+            usuarios = res if isinstance(res, list) else res.get("result", [])
+            if usuarios:
+                u = usuarios[0]
+                info_motoristas[u.get("id")] = {
+                    "nome":      u.get("name", "Desconhecido"),
+                    "matricula": u.get("employeeNo", ""),
+                }
+
+    # ── Monta as linhas, calculando hodômetro inicial e coletando coordenadas ──
+    rows, coords_partida, coords_chegada = [], [], []
+    for did in lista_ids:
+        odo_anterior = None  # hodômetro final da viagem anterior (km)
+        for v in viagens_por_device.get(did, []):
+            start = v.get("start")
+            stop  = v.get("stop")
+            if not start:
+                continue
+
+            odo_final_m = v.get("odometer") or 0          # metros (fim da viagem)
+            odo_final   = round(odo_final_m / 1000, 2) if odo_final_m else None
+            dist        = round(float(v.get("distance") or 0), 2)  # já em km
+
+            # Hodômetro inicial: usa o final da viagem anterior; senão final − distância.
+            if odo_anterior is not None:
+                odo_inicial = odo_anterior
+            elif odo_final is not None:
+                odo_inicial = round(odo_final - dist, 2)
+            else:
+                odo_inicial = None
+            if odo_final is not None:
+                odo_anterior = odo_final
+
+            drv = v.get("driver")
+            drv_id = drv.get("id") if isinstance(drv, dict) else (drv if isinstance(drv, str) else "")
+            mot = info_motoristas.get(drv_id, {})
+
+            dur = v.get("drivingDuration")  # ISO8601 ou ticks — normaliza para segundos
+            dur_seg = _duracao_para_segundos(dur)
+
+            lat_p = v.get("latitude")   # nem sempre presente; StopPoint é do destino
+            lon_p = v.get("longitude")
+            lat_c, lon_c = _coord(v.get("stopPoint"))
+
+            coords_partida.append((lat_p, lon_p))
+            coords_chegada.append((lat_c, lon_c))
+
+            rows.append({
+                "id":                  f"{did}|{start}",
+                "device_id":           did,
+                "serial":              serial_map.get(did, ""),
+                "placa":               placa_map.get(did, ""),
+                "veiculo":             nome_map.get(did, ""),
+                "grupo":               grupo_map.get(did, ""),
+                "todos_grupos":        grupos_todos_map.get(did, ""),
+                "data_partida":        ts_brt(start),
+                "data_chegada":        ts_brt(stop),
+                "duracao_segundos":    dur_seg,
+                "distancia_km":        dist,
+                "hodometro_inicial":   odo_inicial,
+                "hodometro_final":     odo_final,
+                "velocidade_media":    round(float(v.get("averageSpeed") or 0), 1),
+                "velocidade_maxima":   round(float(v.get("maximumSpeed") or 0), 1),
+                "end_partida":         "",   # preenchido após reverse-geocode
+                "end_chegada":         "",
+                "lat_partida":         lat_p or 0,
+                "lon_partida":         lon_p or 0,
+                "lat_chegada":         lat_c or 0,
+                "lon_chegada":         lon_c or 0,
+                "motorista_id":        drv_id,
+                "motorista_nome":      mot.get("nome", "Nenhum"),
+                "motorista_matricula": mot.get("matricula", ""),
+                "atualizado_em":       agora_brt(),
+            })
+
+    # ── Reverse-geocode de partida e chegada (em lote) ──────────────────────
+    log.info(f"  • Geocodificando {len(rows)} viagens (partida + chegada)...")
+    end_partida = reverse_geocode(credentials, coords_partida)
+    end_chegada = reverse_geocode(credentials, coords_chegada)
+    for i, r in enumerate(rows):
+        r["end_partida"] = end_partida[i] if i < len(end_partida) else ""
+        r["end_chegada"] = end_chegada[i] if i < len(end_chegada) else ""
+
+    df = pd.DataFrame(rows)
+    log.info(f"  → {len(df)} viagens extraídas")
+    return df
+
+
+def _duracao_para_segundos(valor):
+    """Converte drivingDuration da Geotab para segundos (int).
+    Aceita ISO8601 ('PT1H30M'), 'HH:MM:SS', ticks (.NET) ou número."""
+    if valor in (None, ""):
+        return 0
+    try:
+        td = pd.to_timedelta(valor)
+        if not pd.isna(td):
+            return int(td.total_seconds())
+    except Exception:
+        pass
+    try:
+        # .NET ticks (100ns) — valores muito grandes
+        n = float(valor)
+        return int(n / 1e7) if n > 1e7 else int(n)
+    except Exception:
+        return 0
+
+
+# ─────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────
 def main(modo=None):
@@ -784,6 +1022,10 @@ def main(modo=None):
         if modo in ("all", "comportamento"):
             df = extrair_comportamento(credentials)
             gravar_tabela(df, "tb_comportamento", engine, chave_upsert="id")
+
+        if modo in ("all", "viagens"):
+            df = extrair_viagens(credentials)
+            gravar_tabela(df, "tb_viagens", engine, chave_upsert="id")
 
     finally:
         engine.dispose()

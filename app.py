@@ -50,7 +50,7 @@ def index():
         "endpoints": {
             "health": "/health",
             "status": "/status",
-            "run":    "/run/<modo>  — modos: all, cadastro, status, comportamento",
+            "run":    "/run/<modo>  — modos: all, cadastro, status, comportamento, viagens",
         },
     })
 
@@ -65,13 +65,14 @@ def health():
 
 @app.route("/status")
 def status():
-    ult = {"cadastro": None, "status": None, "comportamento": None}
+    ult = {"cadastro": None, "status": None, "comportamento": None, "viagens": None}
     try:
         engine = criar_engine()
         with engine.connect() as conn:
             ult["cadastro"]      = conn.execute(text("SELECT MAX(atualizado_em) FROM tb_cadastro")).scalar()
             ult["status"]        = conn.execute(text("SELECT MAX(snapshot_em)   FROM tb_status")).scalar()
             ult["comportamento"] = conn.execute(text("SELECT MAX(atualizado_em) FROM tb_comportamento")).scalar()
+            ult["viagens"]       = conn.execute(text("SELECT MAX(atualizado_em) FROM tb_viagens")).scalar()
         engine.dispose()
     except Exception as exc:
         log.error(f"Erro ao consultar últimas atualizações: {exc}")
@@ -97,8 +98,8 @@ def run_sync(modo):
         if request.args.get("key", "") != API_KEY:
             return jsonify({"error": "unauthorized"}), 401
 
-    if modo not in ("all", "cadastro", "status", "comportamento"):
-        return jsonify({"error": "modo inválido — use: all, cadastro, status, comportamento"}), 400
+    if modo not in ("all", "cadastro", "status", "comportamento", "viagens"):
+        return jsonify({"error": "modo inválido — use: all, cadastro, status, comportamento, viagens"}), 400
 
     thread = threading.Thread(target=executar_sync, args=(modo,), daemon=True)
     thread.start()
@@ -130,6 +131,13 @@ scheduler.add_job(
     lambda: executar_sync("comportamento"),
     CronTrigger(hour=20, minute=0, day_of_week="mon-fri", timezone=BRT),
     id="comportamento",
+)
+
+# Viagens: 21:00 BRT (após comportamento, fora do horário de pico)
+scheduler.add_job(
+    lambda: executar_sync("viagens"),
+    CronTrigger(hour=21, minute=0, day_of_week="mon-fri", timezone=BRT),
+    id="viagens",
 )
 
 scheduler.start()
