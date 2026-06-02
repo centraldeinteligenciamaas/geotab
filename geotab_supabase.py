@@ -3,6 +3,8 @@ import gc
 import sys
 import time
 import logging
+import threading
+import collections
 import unicodedata
 import requests
 import pandas as pd
@@ -57,6 +59,11 @@ DIAG_ODO_FISICO = [
     "DiagnosticOdometerAdjustmentId",
     "DiagnosticOdometer",
 ]
+
+# Devices por lote nas consultas de StatusData (odômetro). Cada device pode ter
+# milhares de leituras em 30 dias; lote menor = menos leituras seguradas por vez
+# = menor pico de memória (essencial no free tier do Render, 512 MB).
+ODO_LOTE = int(os.environ.get("GEOTAB_ODO_LOTE", 25))
 
 
 # ─────────────────────────────────────────────────────────
@@ -303,34 +310,100 @@ def parse_nome_veiculo(nome: str) -> dict:
     }
 
 
+# ── Controle de quota da Geotab (limite oficial: 5000 sub-chamadas / 1 min) ──
+# Estratégia em duas camadas:
+#  1) THROTTLE PROATIVO: janela deslizante de 60s; antes de cada chamada esperamos
+#     ter orçamento para as N sub-chamadas que ela consome (multicall conta N).
+#     Mantém abaixo do teto sem gerar rejeições — crítico p/ frota de 1729 devices.
+#  2) RETRY REATIVO: se ainda assim vier OverLimitException (quota compartilhada
+#     com outros clientes), espera e repete — rede de segurança.
+QUOTA_LIMITE  = int(os.environ.get("GEOTAB_QUOTA_LIMITE", 4500))   # margem sob 5000
+QUOTA_RETRY   = int(os.environ.get("GEOTAB_QUOTA_RETRY", 6))       # tentativas reativas
+QUOTA_PAUSA   = int(os.environ.get("GEOTAB_QUOTA_PAUSA", 12))      # s por tentativa reativa
+
+_quota_lock = threading.Lock()
+_quota_hist = collections.deque()  # timestamps (monotonic) de sub-chamadas recentes
+
+
+def _consumir_quota(unidades):
+    """Bloqueia até haver orçamento para 'unidades' sub-chamadas na janela de 60s,
+    então registra o consumo. Pacing proativo para não estourar a quota."""
+    unidades = max(int(unidades), 1)
+    with _quota_lock:
+        while True:
+            agora = time.monotonic()
+            while _quota_hist and agora - _quota_hist[0] >= 60:
+                _quota_hist.popleft()
+            if len(_quota_hist) + unidades <= QUOTA_LIMITE:
+                _quota_hist.extend([agora] * unidades)
+                return
+            espera = 60 - (agora - _quota_hist[0]) + 0.1
+            log.info(
+                f"  ⏳ Throttle quota: aguardando {espera:.1f}s "
+                f"({len(_quota_hist)}/{QUOTA_LIMITE} sub-chamadas na janela de 60s)"
+            )
+            time.sleep(min(espera, 5))
+
+
+def _eh_erro_quota(resp):
+    """True se a resposta JSON-RPC for um OverLimitException (quota excedida)."""
+    err = resp.get("error") if isinstance(resp, dict) else None
+    if not isinstance(err, dict):
+        return False
+    if (err.get("data") or {}).get("type") == "OverLimitException":
+        return True
+    if any(isinstance(e, dict) and e.get("name") == "OverLimitException"
+           for e in (err.get("errors") or [])):
+        return True
+    return "quota" in str(err.get("message", "")).lower()
+
+
 def _post_geotab(method, params, contexto=""):
     """POST único e blindado para a API Geotab.
+    - Pacing proativo de quota + retry reativo em OverLimitException.
     - Trata corpo vazio / não-JSON sem estourar JSONDecodeError.
     - Loga status HTTP e início do corpo quando o parse falha.
     Retorna o dict da resposta JSON-RPC ({"result": ...} ou {"error": ...}),
     ou {"error": {...}} sintético em caso de falha de rede/parse."""
-    try:
-        r = requests.post(
-            GEOTAB["servidor"],
-            json={"method": method, "params": params},
-            timeout=180,
-        )
-    except Exception as exc:
-        log.warning(f"  ⚠ Falha de rede em {method} {contexto}: {exc}")
-        return {"error": {"message": str(exc)}}
+    unidades = len(params.get("calls", [])) if method == "ExecuteMultiCall" else 1
 
-    corpo = (r.text or "").strip()
-    if not corpo:
-        log.warning(f"  ⚠ {method} {contexto} retornou corpo VAZIO (HTTP {r.status_code}).")
-        return {"error": {"message": "corpo vazio", "httpStatus": r.status_code}}
-    try:
-        return r.json()
-    except ValueError:
-        log.warning(
-            f"  ⚠ {method} {contexto}: resposta não-JSON (HTTP {r.status_code}). "
-            f"Início do corpo: {corpo[:120]!r}"
-        )
-        return {"error": {"message": "resposta não-JSON", "httpStatus": r.status_code}}
+    resp = None
+    for tentativa in range(1, QUOTA_RETRY + 2):
+        _consumir_quota(unidades)
+        try:
+            r = requests.post(
+                GEOTAB["servidor"],
+                json={"method": method, "params": params},
+                timeout=180,
+            )
+        except Exception as exc:
+            log.warning(f"  ⚠ Falha de rede em {method} {contexto}: {exc}")
+            return {"error": {"message": str(exc)}}
+
+        corpo = (r.text or "").strip()
+        if not corpo:
+            log.warning(f"  ⚠ {method} {contexto} retornou corpo VAZIO (HTTP {r.status_code}).")
+            return {"error": {"message": "corpo vazio", "httpStatus": r.status_code}}
+        try:
+            resp = r.json()
+        except ValueError:
+            log.warning(
+                f"  ⚠ {method} {contexto}: resposta não-JSON (HTTP {r.status_code}). "
+                f"Início do corpo: {corpo[:120]!r}"
+            )
+            return {"error": {"message": "resposta não-JSON", "httpStatus": r.status_code}}
+
+        if _eh_erro_quota(resp) and tentativa <= QUOTA_RETRY:
+            espera = QUOTA_PAUSA * tentativa  # 12, 24, 36...
+            log.warning(
+                f"  ⏳ Quota excedida em {method} {contexto} — aguardando {espera}s "
+                f"(retry {tentativa}/{QUOTA_RETRY})"
+            )
+            time.sleep(espera)
+            continue
+        return resp
+
+    return resp
 
 
 def autenticar():
@@ -441,33 +514,41 @@ def extrair_status(credentials):
 
     agora = agora_brt()
     ontem = agora - timedelta(hours=24)
-    res_viagens = multicall(credentials, [
-        {
-            "method": "Get",
-            "params": {
-                "typeName": "Trip",
-                "search": {
-                    "deviceSearch": {"id": did},
-                    "fromDate": ontem.strftime(FMT),
-                    "toDate":   agora.strftime(FMT),
-                },
-            },
-        }
-        for did in lista_ids
-    ])
 
+    # Trips em LOTES de 150 devices: não seguramos os resultados de toda a frota
+    # de uma vez (era o que fazia o status picar ~300 MB). Cada lote é processado
+    # e descartado.
     motoristas_ativos = {}
     driver_ids = set()
-    for i, resultado in enumerate(res_viagens):
-        did     = lista_ids[i]
-        viagens = resultado if isinstance(resultado, list) else resultado.get("result", [])
-        viagem  = next((v for v in viagens if not v.get("stop")), None)
-        if viagem and viagem.get("driver", {}).get("id"):
-            motoristas_ativos[did] = {
-                "driver_id":     viagem["driver"]["id"],
-                "viagem_inicio": viagem.get("start"),
+    LOTE = 150
+    for ini in range(0, len(lista_ids), LOTE):
+        chunk = lista_ids[ini:ini + LOTE]
+        res_viagens = multicall(credentials, [
+            {
+                "method": "Get",
+                "params": {
+                    "typeName": "Trip",
+                    "search": {
+                        "deviceSearch": {"id": did},
+                        "fromDate": ontem.strftime(FMT),
+                        "toDate":   agora.strftime(FMT),
+                    },
+                },
             }
-            driver_ids.add(viagem["driver"]["id"])
+            for did in chunk
+        ])
+        for j, resultado in enumerate(res_viagens):
+            did     = chunk[j]
+            viagens = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
+            viagem  = next((v for v in viagens if not v.get("stop")), None)
+            if viagem and viagem.get("driver", {}).get("id"):
+                motoristas_ativos[did] = {
+                    "driver_id":     viagem["driver"]["id"],
+                    "viagem_inicio": viagem.get("start"),
+                }
+                driver_ids.add(viagem["driver"]["id"])
+        del res_viagens
+        gc.collect()
 
     info_motoristas = {}
     if driver_ids:
@@ -525,7 +606,7 @@ def _inferir_km(valor_raw: float) -> float:
     return round(valor_raw / 1000, 2) if valor_raw > 1_000_000 else round(float(valor_raw), 2)
 
 
-def _max_diag_em_lotes(credentials, lista_ids, diag_id, ini, fim, lote=150):
+def _max_diag_em_lotes(credentials, lista_ids, diag_id, ini, fim, lote=ODO_LOTE):
     """Consulta StatusData em lotes e reduz a {device: max_raw} on-the-fly.
     Nunca acumula todas as leituras em memória — cada lote é processado e
     descartado, mantendo o pico baixo (essencial no free tier do Render)."""
@@ -552,6 +633,7 @@ def _max_diag_em_lotes(credentials, lista_ids, diag_id, ini, fim, lote=150):
             leituras = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
             mapa[did] = max((r.get("data") or 0 for r in leituras), default=0)
         del resultados
+        gc.collect()
     return mapa
 
 
