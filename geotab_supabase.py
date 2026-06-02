@@ -472,7 +472,7 @@ def extrair_status(credentials):
             "motorista_email": mot.get("email", ""),
             "motorista_tel":   mot.get("telefone", ""),
             "viagem_inicio":   ts_brt(viagem.get("viagem_inicio") if viagem else None),
-            "viagem_fim":      ts_brt(viagem.get("viagem_fim") if viagem and not viagem.get("viagem_ativa") else None),
+            "viagem_fim":      ts_brt(viagem.get("viagem_fim") if viagem else None),
             "snapshot_em":     agora_brt(),
         })
 
