@@ -133,7 +133,7 @@ scheduler.add_job(
     id="comportamento",
 )
 
-# Viagens: 21:00 BRT (após comportamento, fora do horário de pico)
+# Viagens: 21:00 BRT
 scheduler.add_job(
     lambda: executar_sync("viagens"),
     CronTrigger(hour=21, minute=0, day_of_week="mon-fri", timezone=BRT),

@@ -163,32 +163,27 @@ def criar_tabelas(engine):
         );
 
         CREATE TABLE IF NOT EXISTS tb_viagens (
-            id                  TEXT PRIMARY KEY,   -- device_id + '|' + start (chave estável da viagem)
+            id                  TEXT PRIMARY KEY,   -- device_id + '|' + start
             device_id           TEXT,
             serial              TEXT,
             placa               TEXT,
             veiculo             TEXT,
-            -- hierarquia organizacional (igual ao cadastro: UO / Gerência / Superintendência)
             grupo               TEXT,
             todos_grupos        TEXT,
-            -- janela da viagem
             data_partida        TIMESTAMP,
             data_chegada        TIMESTAMP,
             duracao_segundos    INTEGER,
-            -- métricas
             distancia_km        DOUBLE PRECISION,
             hodometro_inicial   DOUBLE PRECISION,
             hodometro_final     DOUBLE PRECISION,
             velocidade_media    DOUBLE PRECISION,
             velocidade_maxima   DOUBLE PRECISION,
-            -- endereços (reverse-geocode via GetAddresses)
             end_partida         TEXT,
             end_chegada         TEXT,
             lat_partida         DOUBLE PRECISION,
             lon_partida         DOUBLE PRECISION,
             lat_chegada         DOUBLE PRECISION,
             lon_chegada         DOUBLE PRECISION,
-            -- motorista
             motorista_id        TEXT,
             motorista_nome      TEXT,
             motorista_matricula TEXT,
@@ -238,7 +233,6 @@ def criar_tabelas(engine):
             ADD COLUMN IF NOT EXISTS odometro_gps DOUBLE PRECISION DEFAULT 0;
         ALTER TABLE tb_status
             DROP COLUMN IF EXISTS odometro_inicio;
-        -- matrícula do motorista (employeeNo) também na visão de status em tempo real
         ALTER TABLE tb_status
             ADD COLUMN IF NOT EXISTS motorista_matricula TEXT;
     """
@@ -306,47 +300,86 @@ def parse_nome_veiculo(nome: str) -> dict:
     }
 
 
+def _post_geotab(method, params, contexto=""):
+    """POST único e blindado para a API Geotab.
+    - Trata corpo vazio / não-JSON sem estourar JSONDecodeError.
+    - Loga status HTTP e início do corpo quando o parse falha.
+    Retorna o dict da resposta JSON-RPC ({"result": ...} ou {"error": ...}),
+    ou {"error": {...}} sintético em caso de falha de rede/parse."""
+    try:
+        r = requests.post(
+            GEOTAB["servidor"],
+            json={"method": method, "params": params},
+            timeout=180,
+        )
+    except Exception as exc:
+        log.warning(f"  ⚠ Falha de rede em {method} {contexto}: {exc}")
+        return {"error": {"message": str(exc)}}
+
+    corpo = (r.text or "").strip()
+    if not corpo:
+        log.warning(f"  ⚠ {method} {contexto} retornou corpo VAZIO (HTTP {r.status_code}).")
+        return {"error": {"message": "corpo vazio", "httpStatus": r.status_code}}
+    try:
+        return r.json()
+    except ValueError:
+        log.warning(
+            f"  ⚠ {method} {contexto}: resposta não-JSON (HTTP {r.status_code}). "
+            f"Início do corpo: {corpo[:120]!r}"
+        )
+        return {"error": {"message": "resposta não-JSON", "httpStatus": r.status_code}}
+
+
 def autenticar():
-    resp = requests.post(
-        GEOTAB["servidor"],
-        json={
-            "method": "Authenticate",
-            "params": {
-                "database": GEOTAB["database"],
-                "userName": GEOTAB["userName"],
-                "password": GEOTAB["password"],
-            },
+    """Autentica e respeita o redirecionamento de federation da Geotab.
+    Se a resposta trouxer 'path' diferente de 'ThisServer', aponta GEOTAB_SERVIDOR
+    para o servidor direto do banco — evita respostas vazias nas chamadas seguintes."""
+    resp = _post_geotab(
+        "Authenticate",
+        {
+            "database": GEOTAB["database"],
+            "userName": GEOTAB["userName"],
+            "password": GEOTAB["password"],
         },
-    ).json()
+        contexto="(login)",
+    )
     if "error" in resp:
         log.error(f"Falha na autenticação Geotab: {resp['error']}")
         sys.exit(1)
-    return resp["result"]["credentials"]
+
+    resultado = resp["result"]
+    path = resultado.get("path", "")
+    if path and path != "ThisServer":
+        novo = f"https://{path}/apiv1"
+        if novo != GEOTAB["servidor"]:
+            log.info(f"  ↪ Federation: redirecionando servidor para {novo}")
+            GEOTAB["servidor"] = novo
+    return resultado["credentials"]
 
 
 def geotab_get(credentials, typeName, search=None, resultsLimit=None):
     params = {"credentials": credentials, "typeName": typeName}
     if search:       params["search"]       = search
     if resultsLimit: params["resultsLimit"] = resultsLimit
-    return requests.post(
-        GEOTAB["servidor"], json={"method": "Get", "params": params}
-    ).json().get("result", [])
+    resp = _post_geotab("Get", params, contexto=f"({typeName})")
+    if "error" in resp:
+        log.warning(f"  ⚠ Get {typeName} falhou: {resp['error']}")
+        return []
+    return resp.get("result", []) or []
 
 
 def multicall(credentials, chamadas):
     if not chamadas:
         return []
-    resp = requests.post(
-        GEOTAB["servidor"],
-        json={
-            "method": "ExecuteMultiCall",
-            "params": {"credentials": credentials, "calls": chamadas},
-        },
-    ).json()
+    resp = _post_geotab(
+        "ExecuteMultiCall",
+        {"credentials": credentials, "calls": chamadas},
+        contexto=f"({len(chamadas)} calls)",
+    )
     if "error" in resp:
         log.warning(f"Erro no MultiCall: {resp['error']}")
         return []
-    return resp.get("result", [])
+    return resp.get("result", []) or []
 
 
 def multicall_em_lotes(credentials, chamadas, lote=150):
@@ -762,39 +795,44 @@ def extrair_comportamento(credentials):
 # ─────────────────────────────────────────────────────────
 # TABELA 4 — VIAGENS  (base do Relatório de Viagem estilo SANEAGO)
 # ─────────────────────────────────────────────────────────
-# Quantos dias de viagens trazer por execução. O upsert por chave estável
-# (device|start) garante que reprocessar o mesmo período não duplica linhas.
 VIAGENS_DIAS = int(os.environ.get("VIAGENS_DIAS", 30))
 
 
 def _coord(ponto):
-    """Extrai (lat, lon) de um StopPoint/Coordinate da Geotab. Campos: x=lon, y=lat."""
+    """Extrai (lat, lon) de um StopPoint/Coordinate da Geotab (x=lon, y=lat)."""
     if not isinstance(ponto, dict):
         return None, None
-    lat = ponto.get("y")
-    lon = ponto.get("x")
-    return lat, lon
+    return ponto.get("y"), ponto.get("x")
+
+
+def _duracao_para_segundos(valor):
+    """Converte drivingDuration ('PT1H30M', 'HH:MM:SS', ticks .NET ou número) → segundos."""
+    if valor in (None, ""):
+        return 0
+    try:
+        td = pd.to_timedelta(valor)
+        if not pd.isna(td):
+            return int(td.total_seconds())
+    except Exception:
+        pass
+    try:
+        n = float(valor)
+        return int(n / 1e7) if n > 1e7 else int(n)
+    except Exception:
+        return 0
 
 
 def reverse_geocode(credentials, coordenadas):
-    """Converte uma lista de (lat, lon) em endereços via GetAddresses da Geotab.
-    Retorna lista de strings alinhada à entrada. Coordenadas inválidas → ''.
-    A chamada é feita em lotes para respeitar limites do servidor."""
-    if not coordenadas:
-        return []
-
-    # Monta a lista de coordenadas no formato esperado (x=lon, y=lat),
-    # guardando o índice original para remontar a saída alinhada.
+    """Converte uma lista de (lat, lon) em endereços via GetAddresses.
+    Usa _post_geotab — corpo vazio/não-JSON nunca derruba o sync; apenas
+    deixa o endereço em branco. Coordenadas (0,0)/None são puladas."""
+    enderecos = [""] * len(coordenadas)
     pedidos, indices = [], []
     for i, (lat, lon) in enumerate(coordenadas):
-        if lat in (None, 0) and lon in (None, 0):
-            continue
-        if lat is None or lon is None:
+        if lat in (None, 0) or lon in (None, 0):
             continue
         pedidos.append({"x": lon, "y": lat})
         indices.append(i)
-
-    enderecos = [""] * len(coordenadas)
     if not pedidos:
         return enderecos
 
@@ -802,33 +840,27 @@ def reverse_geocode(credentials, coordenadas):
     for ini in range(0, len(pedidos), LOTE):
         sub_pedidos = pedidos[ini:ini + LOTE]
         sub_indices = indices[ini:ini + LOTE]
-        try:
-            resp = requests.post(
-                GEOTAB["servidor"],
-                json={
-                    "method": "GetAddresses",
-                    "params": {
-                        "credentials": credentials,
-                        "coordinates": sub_pedidos,
-                    },
-                },
-            ).json()
-        except Exception as exc:
-            log.warning(f"  ⚠ Falha no GetAddresses (lote {ini}): {exc}")
-            continue
+        resp = _post_geotab(
+            "GetAddresses",
+            {
+                "credentials": credentials,
+                "coordinates": sub_pedidos,
+                "movingAddresses": True,
+            },
+            contexto=f"(geocode lote {ini})",
+        )
         if "error" in resp:
-            log.warning(f"  ⚠ Erro no GetAddresses: {resp['error']}")
-            continue
-        for j, addr in enumerate(resp.get("result", [])):
+            continue  # mantém endereços em branco neste lote, segue adiante
+        for j, addr in enumerate(resp.get("result", []) or []):
             if j < len(sub_indices):
                 enderecos[sub_indices[j]] = (addr or {}).get("formattedAddress", "")
     return enderecos
 
 
 def extrair_viagens(credentials):
-    """Extrai viagens (Trip) dos últimos VIAGENS_DIAS dias para a base do
-    Relatório de Viagem. Uma linha por viagem concluída, com motorista,
-    matrícula, hodômetro inicial/final, distância, velocidade e endereços."""
+    """Uma linha por viagem (Trip) dos últimos VIAGENS_DIAS dias — base do
+    Relatório de Viagem: partida/chegada, distância, hodômetro, velocidade,
+    endereços e motorista (nome + matrícula)."""
     log.info(f"Extraindo viagens dos últimos {VIAGENS_DIAS} dias...")
 
     veiculos   = geotab_get(credentials, "Device")
@@ -837,7 +869,6 @@ def extrair_viagens(credentials):
     placa_map  = {v.get("id"): v.get("licensePlate", "") for v in veiculos}
     nome_map   = {v.get("id"): v.get("name", "")          for v in veiculos}
 
-    # Hierarquia de grupos (UO / Gerência / Superintendência) — igual ao cadastro.
     grupos = {g.get("id"): g.get("name", "") for g in geotab_get(credentials, "Group")}
     grupo_map, grupos_todos_map = {}, {}
     for v in veiculos:
@@ -848,7 +879,6 @@ def extrair_viagens(credentials):
     data_fim    = agora_brt()
     data_inicio = data_fim - timedelta(days=VIAGENS_DIAS)
 
-    # Busca viagens por device (multicall em lotes — uma chamada Trip por veículo).
     resultados = multicall_em_lotes(credentials, [
         {
             "method": "Get",
@@ -864,14 +894,12 @@ def extrair_viagens(credentials):
         for did in lista_ids
     ])
 
-    # ── Coleta de motoristas referenciados (para resolver nome + matrícula) ──
     driver_ids = set()
     viagens_por_device = {}
     for i, resultado in enumerate(resultados):
         did = lista_ids[i]
         raw = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
         viagens = [v for v in raw if isinstance(v, dict)]
-        # Ordena por início (mais antigo primeiro) para calcular hodômetro inicial.
         viagens.sort(key=lambda v: v.get("start") or "")
         viagens_por_device[did] = viagens
         for v in viagens:
@@ -895,21 +923,19 @@ def extrair_viagens(credentials):
                     "matricula": u.get("employeeNo", ""),
                 }
 
-    # ── Monta as linhas, calculando hodômetro inicial e coletando coordenadas ──
     rows, coords_partida, coords_chegada = [], [], []
     for did in lista_ids:
-        odo_anterior = None  # hodômetro final da viagem anterior (km)
+        odo_anterior = None
         for v in viagens_por_device.get(did, []):
             start = v.get("start")
-            stop  = v.get("stop")
             if not start:
                 continue
+            stop = v.get("stop")
 
-            odo_final_m = v.get("odometer") or 0          # metros (fim da viagem)
+            odo_final_m = v.get("odometer") or 0
             odo_final   = round(odo_final_m / 1000, 2) if odo_final_m else None
-            dist        = round(float(v.get("distance") or 0), 2)  # já em km
+            dist        = round(float(v.get("distance") or 0), 2)
 
-            # Hodômetro inicial: usa o final da viagem anterior; senão final − distância.
             if odo_anterior is not None:
                 odo_inicial = odo_anterior
             elif odo_final is not None:
@@ -923,13 +949,8 @@ def extrair_viagens(credentials):
             drv_id = drv.get("id") if isinstance(drv, dict) else (drv if isinstance(drv, str) else "")
             mot = info_motoristas.get(drv_id, {})
 
-            dur = v.get("drivingDuration")  # ISO8601 ou ticks — normaliza para segundos
-            dur_seg = _duracao_para_segundos(dur)
-
-            lat_p = v.get("latitude")   # nem sempre presente; StopPoint é do destino
-            lon_p = v.get("longitude")
+            lat_p, lon_p = v.get("latitude"), v.get("longitude")
             lat_c, lon_c = _coord(v.get("stopPoint"))
-
             coords_partida.append((lat_p, lon_p))
             coords_chegada.append((lat_c, lon_c))
 
@@ -943,13 +964,13 @@ def extrair_viagens(credentials):
                 "todos_grupos":        grupos_todos_map.get(did, ""),
                 "data_partida":        ts_brt(start),
                 "data_chegada":        ts_brt(stop),
-                "duracao_segundos":    dur_seg,
+                "duracao_segundos":    _duracao_para_segundos(v.get("drivingDuration")),
                 "distancia_km":        dist,
                 "hodometro_inicial":   odo_inicial,
                 "hodometro_final":     odo_final,
                 "velocidade_media":    round(float(v.get("averageSpeed") or 0), 1),
                 "velocidade_maxima":   round(float(v.get("maximumSpeed") or 0), 1),
-                "end_partida":         "",   # preenchido após reverse-geocode
+                "end_partida":         "",
                 "end_chegada":         "",
                 "lat_partida":         lat_p or 0,
                 "lon_partida":         lon_p or 0,
@@ -961,7 +982,6 @@ def extrair_viagens(credentials):
                 "atualizado_em":       agora_brt(),
             })
 
-    # ── Reverse-geocode de partida e chegada (em lote) ──────────────────────
     log.info(f"  • Geocodificando {len(rows)} viagens (partida + chegada)...")
     end_partida = reverse_geocode(credentials, coords_partida)
     end_chegada = reverse_geocode(credentials, coords_chegada)
@@ -972,25 +992,6 @@ def extrair_viagens(credentials):
     df = pd.DataFrame(rows)
     log.info(f"  → {len(df)} viagens extraídas")
     return df
-
-
-def _duracao_para_segundos(valor):
-    """Converte drivingDuration da Geotab para segundos (int).
-    Aceita ISO8601 ('PT1H30M'), 'HH:MM:SS', ticks (.NET) ou número."""
-    if valor in (None, ""):
-        return 0
-    try:
-        td = pd.to_timedelta(valor)
-        if not pd.isna(td):
-            return int(td.total_seconds())
-    except Exception:
-        pass
-    try:
-        # .NET ticks (100ns) — valores muito grandes
-        n = float(valor)
-        return int(n / 1e7) if n > 1e7 else int(n)
-    except Exception:
-        return 0
 
 
 # ─────────────────────────────────────────────────────────
