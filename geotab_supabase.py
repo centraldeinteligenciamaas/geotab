@@ -300,13 +300,17 @@ def geotab_get(credentials, typeName, search=None, resultsLimit=None):
 def multicall(credentials, chamadas):
     if not chamadas:
         return []
-    resp = requests.post(
-        GEOTAB["servidor"],
-        json={
-            "method": "ExecuteMultiCall",
-            "params": {"credentials": credentials, "calls": chamadas},
-        },
-    ).json()
+    try:
+        resp = requests.post(
+            GEOTAB["servidor"],
+            json={
+                "method": "ExecuteMultiCall",
+                "params": {"credentials": credentials, "calls": chamadas},
+            },
+        ).json()
+    except Exception as exc:
+        log.warning(f"Erro ao decodificar resposta do MultiCall: {exc}")
+        return []
     if "error" in resp:
         log.warning(f"Erro no MultiCall: {resp['error']}")
         return []
@@ -414,14 +418,15 @@ def extrair_status(credentials):
             viagens_ord[0],
         )
 
-        if viagem and viagem.get("driver", {}).get("id"):
-            motoristas_ativos[did] = {
-                "driver_id":     viagem["driver"]["id"],
-                "viagem_inicio": viagem.get("start"),
-                "viagem_fim":    viagem.get("stop"),
-                "viagem_ativa":  not viagem.get("stopDurationTicks"),
-            }
-            driver_ids.add(viagem["driver"]["id"])
+        driver_id = (viagem.get("driver") or {}).get("id") or ""
+        motoristas_ativos[did] = {
+            "driver_id":     driver_id,
+            "viagem_inicio": viagem.get("start"),
+            "viagem_fim":    viagem.get("stop"),
+            "viagem_ativa":  not viagem.get("stopDurationTicks"),
+        }
+        if driver_id and driver_id != "NoDriver":
+            driver_ids.add(driver_id)
 
     info_motoristas = {}
     if driver_ids:
