@@ -177,6 +177,8 @@ def criar_tabelas(engine):
             placa               TEXT,
             veiculo             TEXT,
             grupo               TEXT,
+            regional            TEXT,
+            superintendencia    TEXT,
             todos_grupos        TEXT,
             data_partida        TIMESTAMP,
             data_chegada        TIMESTAMP,
@@ -243,6 +245,9 @@ def criar_tabelas(engine):
             DROP COLUMN IF EXISTS odometro_inicio;
         ALTER TABLE tb_status
             ADD COLUMN IF NOT EXISTS motorista_matricula TEXT;
+        ALTER TABLE tb_viagens
+            ADD COLUMN IF NOT EXISTS regional         TEXT,
+            ADD COLUMN IF NOT EXISTS superintendencia TEXT;
     """
     def _executar():
         with engine.begin() as conn:
@@ -879,9 +884,10 @@ def extrair_comportamento(credentials):
 # ─────────────────────────────────────────────────────────
 # TABELA 4 — VIAGENS  (base do Relatório de Viagem estilo SANEAGO)
 # ─────────────────────────────────────────────────────────
-# Janela de extração. Na PRIMEIRA carga use algo pequeno (ex.: VIAGENS_DIAS=7)
-# para validar rápido; depois aumente.
-VIAGENS_DIAS = int(os.environ.get("VIAGENS_DIAS", 30))
+# Janela de extração. Padrão = MÊS CORRENTE (do dia 1 às 00:00 até agora).
+# VIAGENS_DIAS > 0 sobrescreve com uma janela móvel de N dias (útil p/ smoke test:
+# ex. VIAGENS_DIAS=2). VIAGENS_DIAS=0 (padrão) → mês corrente.
+VIAGENS_DIAS = int(os.environ.get("VIAGENS_DIAS", 0))
 
 # Reverse geocode (GetAddresses) dobra o volume de chamadas e é o trecho mais
 # lento. Desligue na primeira carga com VIAGENS_GEOCODE=0 e ligue depois.
@@ -987,6 +993,8 @@ def _montar_viagem_row(v, did, maps, info_motoristas, odo_anterior):
         "placa":               maps["placa"].get(did, ""),
         "veiculo":             maps["nome"].get(did, ""),
         "grupo":               maps["grupo"].get(did, ""),
+        "regional":            maps["regional"].get(did, ""),
+        "superintendencia":    maps["superintendencia"].get(did, ""),
         "todos_grupos":        maps["grupos_todos"].get(did, ""),
         "data_partida":        ts_brt(start),
         "data_chegada":        ts_brt(stop),
@@ -1021,9 +1029,10 @@ def sincronizar_viagens(credentials, engine):
 
     A continuidade do hodômetro é preservada porque cada device é processado por
     inteiro dentro de um único lote (odo_anterior encadeia as viagens do device)."""
+    periodo = f"{VIAGENS_DIAS} dias" if VIAGENS_DIAS > 0 else "mês corrente"
     log.info(
-        f"Extraindo viagens dos últimos {VIAGENS_DIAS} dias "
-        f"(geocode={'on' if VIAGENS_GEOCODE else 'off'}, lote={VIAGENS_DEVICE_LOTE} devices)..."
+        f"Extraindo viagens ({periodo}, geocode={'on' if VIAGENS_GEOCODE else 'off'}, "
+        f"lote={VIAGENS_DEVICE_LOTE} devices)..."
     )
 
     veiculos  = geotab_get(credentials, "Device")
@@ -1031,20 +1040,32 @@ def sincronizar_viagens(credentials, engine):
 
     grupos = {g.get("id"): g.get("name", "") for g in geotab_get(credentials, "Group")}
     maps = {
-        "serial":       {v.get("id"): v.get("serialNumber", "") for v in veiculos},
-        "placa":        {v.get("id"): v.get("licensePlate", "") for v in veiculos},
-        "nome":         {v.get("id"): v.get("name", "")          for v in veiculos},
-        "grupo":        {},
-        "grupos_todos": {},
+        "serial":           {v.get("id"): v.get("serialNumber", "") for v in veiculos},
+        "placa":            {v.get("id"): v.get("licensePlate", "") for v in veiculos},
+        "nome":             {v.get("id"): v.get("name", "")          for v in veiculos},
+        "grupo":            {},
+        "grupos_todos":     {},
+        "regional":         {},
+        "superintendencia": {},
     }
     for v in veiculos:
         gnomes = [grupos.get(g.get("id"), g.get("id")) for g in v.get("groups", [])]
-        maps["grupo"][v.get("id")]        = gnomes[-1] if gnomes else ""
-        maps["grupos_todos"][v.get("id")] = " | ".join(gnomes)
+        did = v.get("id")
+        maps["grupo"][did]            = gnomes[-1] if gnomes else ""
+        maps["grupos_todos"][did]     = " | ".join(gnomes)
+        # Hierarquia SANEAGO codificada por prefixo no nome do grupo:
+        # REG_ = regional, SUP_ = superintendência (guarda o nome completo do grupo).
+        maps["regional"][did]         = next((g for g in gnomes if g.startswith("REG_")), "")
+        maps["superintendencia"][did] = next((g for g in gnomes if g.startswith("SUP_")), "")
     del grupos, veiculos
 
-    data_fim    = agora_brt()
-    data_inicio = data_fim - timedelta(days=VIAGENS_DIAS)
+    data_fim = agora_brt()
+    if VIAGENS_DIAS > 0:
+        data_inicio = data_fim - timedelta(days=VIAGENS_DIAS)
+    else:
+        # Mês corrente: do dia 1 às 00:00 até agora.
+        data_inicio = data_fim.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    log.info(f"  • Janela: {data_inicio:%Y-%m-%d %H:%M} → {data_fim:%Y-%m-%d %H:%M}")
 
     total_lotes    = (len(lista_ids) + VIAGENS_DEVICE_LOTE - 1) // VIAGENS_DEVICE_LOTE
     total_gravadas = 0
