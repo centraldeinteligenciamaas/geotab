@@ -1,4 +1,5 @@
 import os
+import gc
 import sys
 import time
 import logging
@@ -254,7 +255,9 @@ def gravar_tabela(df, nome_tabela, engine, chave_upsert="id"):
     def _executar():
         with engine.begin() as conn:
             temp = f"tmp_{nome_tabela}"
-            df.to_sql(temp, conn, if_exists="replace", index=False)
+            # chunksize: insere em blocos para não materializar o INSERT inteiro
+            # em memória — essencial no free tier do Render (512 MB).
+            df.to_sql(temp, conn, if_exists="replace", index=False, chunksize=1000)
 
             colunas    = df.columns.tolist()
             cols_str   = ", ".join(colunas)
@@ -380,14 +383,6 @@ def multicall(credentials, chamadas):
         log.warning(f"Erro no MultiCall: {resp['error']}")
         return []
     return resp.get("result", []) or []
-
-
-def multicall_em_lotes(credentials, chamadas, lote=150):
-    """Divide um multicall grande em lotes para evitar timeout/disconnect no servidor."""
-    resultados = []
-    for i in range(0, len(chamadas), lote):
-        resultados.extend(multicall(credentials, chamadas[i:i + lote]))
-    return resultados
 
 
 # ─────────────────────────────────────────────────────────
@@ -530,31 +525,33 @@ def _inferir_km(valor_raw: float) -> float:
     return round(valor_raw / 1000, 2) if valor_raw > 1_000_000 else round(float(valor_raw), 2)
 
 
-def _consultar_diag(credentials, lista_ids, diag_id, ini, fim):
-    return multicall_em_lotes(credentials, [
-        {
-            "method": "Get",
-            "params": {
-                "typeName": "StatusData",
-                "search": {
-                    "deviceSearch":     {"id": did},
-                    "diagnosticSearch": {"id": diag_id},
-                    "fromDate": ini.strftime(FMT),
-                    "toDate":   fim.strftime(FMT),
-                },
-            },
-        }
-        for did in lista_ids
-    ])
-
-
-def _max_por_device(resultados, lista_ids):
-    """Extrai o valor máximo bruto (sem conversão) por device."""
+def _max_diag_em_lotes(credentials, lista_ids, diag_id, ini, fim, lote=150):
+    """Consulta StatusData em lotes e reduz a {device: max_raw} on-the-fly.
+    Nunca acumula todas as leituras em memória — cada lote é processado e
+    descartado, mantendo o pico baixo (essencial no free tier do Render)."""
     mapa = {}
-    for i, resultado in enumerate(resultados):
-        did      = lista_ids[i]
-        leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
-        mapa[did] = max((r.get("data") or 0 for r in leituras), default=0)
+    for i in range(0, len(lista_ids), lote):
+        sub = lista_ids[i:i + lote]
+        resultados = multicall(credentials, [
+            {
+                "method": "Get",
+                "params": {
+                    "typeName": "StatusData",
+                    "search": {
+                        "deviceSearch":     {"id": did},
+                        "diagnosticSearch": {"id": diag_id},
+                        "fromDate": ini.strftime(FMT),
+                        "toDate":   fim.strftime(FMT),
+                    },
+                },
+            }
+            for did in sub
+        ])
+        for j, resultado in enumerate(resultados):
+            did      = sub[j]
+            leituras = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
+            mapa[did] = max((r.get("data") or 0 for r in leituras), default=0)
+        del resultados
     return mapa
 
 
@@ -563,12 +560,9 @@ def _com_fallback_ano(credentials, lista_ids, diag_id, data_inicio, mapa_raw):
     sem_dado = [did for did, v in mapa_raw.items() if not v]
     if not sem_dado:
         return
-    um_ano = data_inicio - timedelta(days=365)
-    res2   = _consultar_diag(credentials, sem_dado, diag_id, um_ano, data_inicio)
-    for i, resultado in enumerate(res2):
-        did      = sem_dado[i]
-        leituras = resultado if isinstance(resultado, list) else resultado.get("result", [])
-        v = max((r.get("data") or 0 for r in leituras), default=0)
+    um_ano   = data_inicio - timedelta(days=365)
+    fallback = _max_diag_em_lotes(credentials, sem_dado, diag_id, um_ano, data_inicio)
+    for did, v in fallback.items():
         if v:
             mapa_raw[did] = v
     recuperados = sum(1 for did in sem_dado if mapa_raw[did])
@@ -579,8 +573,7 @@ def buscar_odo_gps(credentials, lista_ids, data_inicio, data_fim):
     """Retorna {device_id: km} via GPS (DiagnosticDeviceTotalDistanceId).
     Valores sempre em metros → divide por 1000."""
     log.info(f"  • GPS odômetro via '{DIAG_GPS}'...")
-    resultados = _consultar_diag(credentials, lista_ids, DIAG_GPS, data_inicio, data_fim)
-    mapa_raw   = _max_por_device(resultados, lista_ids)
+    mapa_raw = _max_diag_em_lotes(credentials, lista_ids, DIAG_GPS, data_inicio, data_fim)
     _com_fallback_ano(credentials, lista_ids, DIAG_GPS, data_inicio, mapa_raw)
     mapa_km = {did: round(v / 1000, 2) if v else 0.0 for did, v in mapa_raw.items()}
     com_dado = sum(1 for v in mapa_km.values() if v > 0)
@@ -593,8 +586,7 @@ def buscar_odo_fisico(credentials, lista_ids, data_inicio, data_fim):
     Testa DIAG_ODO_FISICO em ordem; unidade inferida automaticamente por _inferir_km."""
     for diag_id in DIAG_ODO_FISICO:
         log.info(f"  • Odômetro físico via '{diag_id}'...")
-        resultados = _consultar_diag(credentials, lista_ids, diag_id, data_inicio, data_fim)
-        mapa_raw   = _max_por_device(resultados, lista_ids)
+        mapa_raw = _max_diag_em_lotes(credentials, lista_ids, diag_id, data_inicio, data_fim)
         _com_fallback_ano(credentials, lista_ids, diag_id, data_inicio, mapa_raw)
 
         mapa_km     = {did: _inferir_km(v) for did, v in mapa_raw.items()}
@@ -737,7 +729,9 @@ def extrair_comportamento(credentials):
             )
         return eventos
 
-    # Velocidade (todas as regras, todas as janelas)
+    # Velocidade (todas as regras, todas as janelas).
+    # Cada janela pode trazer até LIMIT eventos — processa e descarta na hora
+    # (del + gc) para não acumular dezenas de milhares de dicts em memória.
     total_vel, contados_vel, ignorados_vel = 0, 0, 0
     for rid in ids_velocidade:
         for ini, fim in janelas:
@@ -746,6 +740,8 @@ def extrair_comportamento(credentials):
             c, i = processar_eventos(eventos, "excesso_velocidade", "ultimo_excesso")
             contados_vel += c
             ignorados_vel += i
+            del eventos
+        gc.collect()
     log.info(f"  • excesso_velocidade: {total_vel} eventos ({contados_vel} atribuídos, {ignorados_vel} sem match)")
 
     # Demais tipos
@@ -760,6 +756,8 @@ def extrair_comportamento(credentials):
             c, i = processar_eventos(eventos, tipo, CAMPO_ULTIMO[tipo])
             contados_total += c
             ignorados_total += i
+            del eventos
+        gc.collect()
         log.info(f"  • {tipo}: {total} eventos ({contados_total} atribuídos, {ignorados_total} sem match)")
 
     rows = []
@@ -802,6 +800,11 @@ VIAGENS_DIAS = int(os.environ.get("VIAGENS_DIAS", 30))
 # Reverse geocode (GetAddresses) dobra o volume de chamadas e é o trecho mais
 # lento. Desligue na primeira carga com VIAGENS_GEOCODE=0 e ligue depois.
 VIAGENS_GEOCODE = os.environ.get("VIAGENS_GEOCODE", "1") not in ("0", "false", "False", "")
+
+# Dispositivos processados por lote no modo viagens. Cada lote é buscado,
+# geocodificado, gravado (upsert) e descartado antes do próximo — mantém o pico
+# de memória limitado a um lote (essencial no free tier do Render, 512 MB).
+VIAGENS_DEVICE_LOTE = int(os.environ.get("VIAGENS_DEVICE_LOTE", 25))
 
 
 def _coord(ponto):
@@ -865,151 +868,182 @@ def reverse_geocode(credentials, coordenadas):
     return enderecos
 
 
-def extrair_viagens(credentials):
-    """Uma linha por viagem (Trip) dos últimos VIAGENS_DIAS dias — base do
-    Relatório de Viagem: partida/chegada, distância, hodômetro, velocidade,
-    endereços e motorista (nome + matrícula).
+def _montar_viagem_row(v, did, maps, info_motoristas, odo_anterior):
+    """Monta a row de UMA viagem e devolve (row, lat_p, lon_p, lat_c, lon_c, novo_odo_anterior).
+    Mantém a continuidade do hodômetro via odo_anterior (encadeado por device)."""
+    start = v.get("start")
+    stop  = v.get("stop")
 
-    Roda APENAS no modo 'viagens' (não faz parte do 'all') — é o trecho mais
-    pesado do pipeline. Geocode controlado por VIAGENS_GEOCODE."""
-    log.info(f"Extraindo viagens dos últimos {VIAGENS_DIAS} dias (geocode={'on' if VIAGENS_GEOCODE else 'off'})...")
+    odo_final_m = v.get("odometer") or 0
+    odo_final   = round(odo_final_m / 1000, 2) if odo_final_m else None
+    dist        = round(float(v.get("distance") or 0), 2)
 
-    veiculos   = geotab_get(credentials, "Device")
-    lista_ids  = [v.get("id") for v in veiculos]
-    serial_map = {v.get("id"): v.get("serialNumber", "") for v in veiculos}
-    placa_map  = {v.get("id"): v.get("licensePlate", "") for v in veiculos}
-    nome_map   = {v.get("id"): v.get("name", "")          for v in veiculos}
-    log.info(f"  • {len(lista_ids)} dispositivos — buscando Trips em lotes...")
+    if odo_anterior is not None:
+        odo_inicial = odo_anterior
+    elif odo_final is not None:
+        odo_inicial = round(odo_final - dist, 2)
+    else:
+        odo_inicial = None
+    if odo_final is not None:
+        odo_anterior = odo_final
+
+    drv    = v.get("driver")
+    drv_id = drv.get("id") if isinstance(drv, dict) else (drv if isinstance(drv, str) else "")
+    mot    = info_motoristas.get(drv_id, {})
+
+    lat_p, lon_p = v.get("latitude"), v.get("longitude")
+    lat_c, lon_c = _coord(v.get("stopPoint"))
+
+    row = {
+        "id":                  f"{did}|{start}",
+        "device_id":           did,
+        "serial":              maps["serial"].get(did, ""),
+        "placa":               maps["placa"].get(did, ""),
+        "veiculo":             maps["nome"].get(did, ""),
+        "grupo":               maps["grupo"].get(did, ""),
+        "todos_grupos":        maps["grupos_todos"].get(did, ""),
+        "data_partida":        ts_brt(start),
+        "data_chegada":        ts_brt(stop),
+        "duracao_segundos":    _duracao_para_segundos(v.get("drivingDuration")),
+        "distancia_km":        dist,
+        "hodometro_inicial":   odo_inicial,
+        "hodometro_final":     odo_final,
+        "velocidade_media":    round(float(v.get("averageSpeed") or 0), 1),
+        "velocidade_maxima":   round(float(v.get("maximumSpeed") or 0), 1),
+        "end_partida":         "",
+        "end_chegada":         "",
+        "lat_partida":         lat_p or 0,
+        "lon_partida":         lon_p or 0,
+        "lat_chegada":         lat_c or 0,
+        "lon_chegada":         lon_c or 0,
+        "motorista_id":        drv_id,
+        "motorista_nome":      mot.get("nome", "Nenhum"),
+        "motorista_matricula": mot.get("matricula", ""),
+        "atualizado_em":       agora_brt(),
+    }
+    return row, lat_p, lon_p, lat_c, lon_c, odo_anterior
+
+
+def sincronizar_viagens(credentials, engine):
+    """Extrai e grava viagens (Trips) dos últimos VIAGENS_DIAS dias em LOTES de
+    dispositivos. Cada lote é buscado, geocodificado, gravado (upsert por id) e
+    descartado antes do próximo — o pico de memória fica limitado a um lote, não
+    à frota inteira (essencial no free tier do Render, 512 MB).
+
+    Roda APENAS no modo 'viagens' (não faz parte do 'all'). Geocode controlado
+    por VIAGENS_GEOCODE. Retorna o total de viagens gravadas.
+
+    A continuidade do hodômetro é preservada porque cada device é processado por
+    inteiro dentro de um único lote (odo_anterior encadeia as viagens do device)."""
+    log.info(
+        f"Extraindo viagens dos últimos {VIAGENS_DIAS} dias "
+        f"(geocode={'on' if VIAGENS_GEOCODE else 'off'}, lote={VIAGENS_DEVICE_LOTE} devices)..."
+    )
+
+    veiculos  = geotab_get(credentials, "Device")
+    lista_ids = [v.get("id") for v in veiculos]
 
     grupos = {g.get("id"): g.get("name", "") for g in geotab_get(credentials, "Group")}
-    grupo_map, grupos_todos_map = {}, {}
+    maps = {
+        "serial":       {v.get("id"): v.get("serialNumber", "") for v in veiculos},
+        "placa":        {v.get("id"): v.get("licensePlate", "") for v in veiculos},
+        "nome":         {v.get("id"): v.get("name", "")          for v in veiculos},
+        "grupo":        {},
+        "grupos_todos": {},
+    }
     for v in veiculos:
         gnomes = [grupos.get(g.get("id"), g.get("id")) for g in v.get("groups", [])]
-        grupo_map[v.get("id")]        = gnomes[-1] if gnomes else ""
-        grupos_todos_map[v.get("id")] = " | ".join(gnomes)
+        maps["grupo"][v.get("id")]        = gnomes[-1] if gnomes else ""
+        maps["grupos_todos"][v.get("id")] = " | ".join(gnomes)
+    del grupos, veiculos
 
     data_fim    = agora_brt()
     data_inicio = data_fim - timedelta(days=VIAGENS_DIAS)
 
-    resultados = multicall_em_lotes(credentials, [
-        {
-            "method": "Get",
-            "params": {
-                "typeName": "Trip",
-                "search": {
-                    "deviceSearch": {"id": did},
-                    "fromDate": data_inicio.strftime(FMT),
-                    "toDate":   data_fim.strftime(FMT),
+    total_lotes    = (len(lista_ids) + VIAGENS_DEVICE_LOTE - 1) // VIAGENS_DEVICE_LOTE
+    total_gravadas = 0
+
+    for n, ini in enumerate(range(0, len(lista_ids), VIAGENS_DEVICE_LOTE), start=1):
+        chunk_ids = lista_ids[ini:ini + VIAGENS_DEVICE_LOTE]
+        log.info(f"  • Lote {n}/{total_lotes} — {len(chunk_ids)} dispositivos")
+
+        resultados = multicall(credentials, [
+            {
+                "method": "Get",
+                "params": {
+                    "typeName": "Trip",
+                    "search": {
+                        "deviceSearch": {"id": did},
+                        "fromDate": data_inicio.strftime(FMT),
+                        "toDate":   data_fim.strftime(FMT),
+                    },
                 },
-            },
-        }
-        for did in lista_ids
-    ])
+            }
+            for did in chunk_ids
+        ])
 
-    driver_ids = set()
-    viagens_por_device = {}
-    for i, resultado in enumerate(resultados):
-        did = lista_ids[i]
-        raw = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
-        viagens = [v for v in raw if isinstance(v, dict)]
-        viagens.sort(key=lambda v: v.get("start") or "")
-        viagens_por_device[did] = viagens
-        for v in viagens:
-            drv = v.get("driver")
-            if isinstance(drv, dict) and drv.get("id"):
-                driver_ids.add(drv["id"])
-            elif isinstance(drv, str) and drv not in ("NoDriver", "UnknownDriverId"):
-                driver_ids.add(drv)
+        driver_ids = set()
+        viagens_por_device = {}
+        for j, resultado in enumerate(resultados):
+            did = chunk_ids[j]
+            raw = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
+            viagens = [v for v in raw if isinstance(v, dict)]
+            viagens.sort(key=lambda v: v.get("start") or "")
+            viagens_por_device[did] = viagens
+            for v in viagens:
+                drv = v.get("driver")
+                if isinstance(drv, dict) and drv.get("id"):
+                    driver_ids.add(drv["id"])
+                elif isinstance(drv, str) and drv not in ("NoDriver", "UnknownDriverId"):
+                    driver_ids.add(drv)
+        del resultados
 
-    total_viagens = sum(len(v) for v in viagens_por_device.values())
-    log.info(f"  • {total_viagens} viagens brutas / {len(driver_ids)} motoristas distintos")
+        info_motoristas = {}
+        if driver_ids:
+            for res in multicall(credentials, [
+                {"method": "Get", "params": {"typeName": "User", "search": {"id": did}}}
+                for did in driver_ids
+            ]):
+                usuarios = res if isinstance(res, list) else (res or {}).get("result", [])
+                if usuarios:
+                    u = usuarios[0]
+                    info_motoristas[u.get("id")] = {
+                        "nome":      u.get("name", "Desconhecido"),
+                        "matricula": u.get("employeeNo", ""),
+                    }
 
-    info_motoristas = {}
-    if driver_ids:
-        for res in multicall(credentials, [
-            {"method": "Get", "params": {"typeName": "User", "search": {"id": did}}}
-            for did in driver_ids
-        ]):
-            usuarios = res if isinstance(res, list) else res.get("result", [])
-            if usuarios:
-                u = usuarios[0]
-                info_motoristas[u.get("id")] = {
-                    "nome":      u.get("name", "Desconhecido"),
-                    "matricula": u.get("employeeNo", ""),
-                }
+        rows, coords_partida, coords_chegada = [], [], []
+        for did in chunk_ids:
+            odo_anterior = None
+            for v in viagens_por_device.get(did, []):
+                if not v.get("start"):
+                    continue
+                row, lat_p, lon_p, lat_c, lon_c, odo_anterior = _montar_viagem_row(
+                    v, did, maps, info_motoristas, odo_anterior
+                )
+                rows.append(row)
+                coords_partida.append((lat_p, lon_p))
+                coords_chegada.append((lat_c, lon_c))
+        del viagens_por_device, info_motoristas
 
-    rows, coords_partida, coords_chegada = [], [], []
-    for did in lista_ids:
-        odo_anterior = None
-        for v in viagens_por_device.get(did, []):
-            start = v.get("start")
-            if not start:
-                continue
-            stop = v.get("stop")
+        if rows and VIAGENS_GEOCODE:
+            log.info(f"    → geocodificando {len(rows)} viagens do lote...")
+            end_partida = reverse_geocode(credentials, coords_partida)
+            end_chegada = reverse_geocode(credentials, coords_chegada)
+            for k, r in enumerate(rows):
+                r["end_partida"] = end_partida[k] if k < len(end_partida) else ""
+                r["end_chegada"] = end_chegada[k] if k < len(end_chegada) else ""
+            del end_partida, end_chegada
+        del coords_partida, coords_chegada
 
-            odo_final_m = v.get("odometer") or 0
-            odo_final   = round(odo_final_m / 1000, 2) if odo_final_m else None
-            dist        = round(float(v.get("distance") or 0), 2)
+        if rows:
+            gravar_tabela(pd.DataFrame(rows), "tb_viagens", engine, chave_upsert="id")
+            total_gravadas += len(rows)
+        del rows
+        gc.collect()
 
-            if odo_anterior is not None:
-                odo_inicial = odo_anterior
-            elif odo_final is not None:
-                odo_inicial = round(odo_final - dist, 2)
-            else:
-                odo_inicial = None
-            if odo_final is not None:
-                odo_anterior = odo_final
-
-            drv = v.get("driver")
-            drv_id = drv.get("id") if isinstance(drv, dict) else (drv if isinstance(drv, str) else "")
-            mot = info_motoristas.get(drv_id, {})
-
-            lat_p, lon_p = v.get("latitude"), v.get("longitude")
-            lat_c, lon_c = _coord(v.get("stopPoint"))
-            coords_partida.append((lat_p, lon_p))
-            coords_chegada.append((lat_c, lon_c))
-
-            rows.append({
-                "id":                  f"{did}|{start}",
-                "device_id":           did,
-                "serial":              serial_map.get(did, ""),
-                "placa":               placa_map.get(did, ""),
-                "veiculo":             nome_map.get(did, ""),
-                "grupo":               grupo_map.get(did, ""),
-                "todos_grupos":        grupos_todos_map.get(did, ""),
-                "data_partida":        ts_brt(start),
-                "data_chegada":        ts_brt(stop),
-                "duracao_segundos":    _duracao_para_segundos(v.get("drivingDuration")),
-                "distancia_km":        dist,
-                "hodometro_inicial":   odo_inicial,
-                "hodometro_final":     odo_final,
-                "velocidade_media":    round(float(v.get("averageSpeed") or 0), 1),
-                "velocidade_maxima":   round(float(v.get("maximumSpeed") or 0), 1),
-                "end_partida":         "",
-                "end_chegada":         "",
-                "lat_partida":         lat_p or 0,
-                "lon_partida":         lon_p or 0,
-                "lat_chegada":         lat_c or 0,
-                "lon_chegada":         lon_c or 0,
-                "motorista_id":        drv_id,
-                "motorista_nome":      mot.get("nome", "Nenhum"),
-                "motorista_matricula": mot.get("matricula", ""),
-                "atualizado_em":       agora_brt(),
-            })
-
-    if VIAGENS_GEOCODE:
-        log.info(f"  • Geocodificando {len(rows)} viagens (partida + chegada)...")
-        end_partida = reverse_geocode(credentials, coords_partida)
-        end_chegada = reverse_geocode(credentials, coords_chegada)
-        for i, r in enumerate(rows):
-            r["end_partida"] = end_partida[i] if i < len(end_partida) else ""
-            r["end_chegada"] = end_chegada[i] if i < len(end_chegada) else ""
-    else:
-        log.info("  • Geocode DESLIGADO (VIAGENS_GEOCODE=0) — endereços em branco")
-
-    df = pd.DataFrame(rows)
-    log.info(f"  → {len(df)} viagens extraídas")
-    return df
+    log.info(f"  → {total_gravadas} viagens gravadas em tb_viagens")
+    return total_gravadas
 
 
 # ─────────────────────────────────────────────────────────
@@ -1033,20 +1067,26 @@ def main(modo=None):
         if modo in ("all", "cadastro"):
             df = extrair_cadastro(credentials)
             gravar_tabela(df, "tb_cadastro", engine, chave_upsert="id")
+            del df
+            gc.collect()
 
         if modo in ("all", "status"):
             df = extrair_status(credentials)
             gravar_tabela(df, "tb_status", engine, chave_upsert="id")
+            del df
+            gc.collect()
 
         if modo in ("all", "comportamento"):
             df = extrair_comportamento(credentials)
             gravar_tabela(df, "tb_comportamento", engine, chave_upsert="id")
+            del df
+            gc.collect()
 
         # IMPORTANTE: viagens NÃO entra no 'all' — só roda no modo explícito.
         # É o trecho mais pesado (Trips por device + geocode) e travava o 'all'.
+        # sincronizar_viagens já grava em lotes e libera memória a cada lote.
         if modo == "viagens":
-            df = extrair_viagens(credentials)
-            gravar_tabela(df, "tb_viagens", engine, chave_upsert="id")
+            sincronizar_viagens(credentials, engine)
 
     finally:
         engine.dispose()
