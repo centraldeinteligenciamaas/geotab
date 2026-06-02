@@ -140,6 +140,7 @@ def criar_tabelas(engine):
             motorista_email  TEXT,
             motorista_tel    TEXT,
             viagem_inicio    TIMESTAMP,
+            viagem_fim       TIMESTAMP,
             snapshot_em      TIMESTAMP
         );
 
@@ -200,6 +201,8 @@ def criar_tabelas(engine):
         ALTER TABLE tb_comportamento
             ADD COLUMN IF NOT EXISTS odometro     DOUBLE PRECISION DEFAULT 0,
             ADD COLUMN IF NOT EXISTS odometro_gps DOUBLE PRECISION DEFAULT 0;
+        ALTER TABLE tb_status
+            ADD COLUMN IF NOT EXISTS viagem_fim TIMESTAMP;
         ALTER TABLE tb_status
             DROP COLUMN IF EXISTS odometro_inicio;
     """
@@ -394,11 +397,29 @@ def extrair_status(credentials):
     for i, resultado in enumerate(res_viagens):
         did     = lista_ids[i]
         viagens = resultado if isinstance(resultado, list) else resultado.get("result", [])
-        viagem  = next((v for v in viagens if not v.get("stop")), None)
+        if not viagens:
+            continue
+
+        # A API da Geotab SEMPRE preenche "stop" (estimativa) mesmo em viagens em
+        # andamento, então filtrar por "not stop" não funciona. O critério correto:
+        # uma viagem CONCLUÍDA tem stopDurationTicks > 0; uma viagem ATIVA tem
+        # stopDurationTicks == 0 (ou ausente). Ordena por "start" (mais recente
+        # primeiro) para garantir que pegamos a viagem corrente.
+        viagens_ord = sorted(viagens, key=lambda v: v.get("start") or "", reverse=True)
+
+        # Prioriza a viagem ativa (em andamento); se não houver, usa a mais recente
+        # concluída — assim a tabela ainda mostra início e fim do último deslocamento.
+        viagem = next(
+            (v for v in viagens_ord if not v.get("stopDurationTicks")),
+            viagens_ord[0],
+        )
+
         if viagem and viagem.get("driver", {}).get("id"):
             motoristas_ativos[did] = {
                 "driver_id":     viagem["driver"]["id"],
                 "viagem_inicio": viagem.get("start"),
+                "viagem_fim":    viagem.get("stop"),
+                "viagem_ativa":  not viagem.get("stopDurationTicks"),
             }
             driver_ids.add(viagem["driver"]["id"])
 
@@ -436,6 +457,7 @@ def extrair_status(credentials):
             "motorista_email": mot.get("email", ""),
             "motorista_tel":   mot.get("telefone", ""),
             "viagem_inicio":   ts_brt(viagem.get("viagem_inicio") if viagem else None),
+            "viagem_fim":      ts_brt(viagem.get("viagem_fim") if viagem and not viagem.get("viagem_ativa") else None),
             "snapshot_em":     agora_brt(),
         })
 
