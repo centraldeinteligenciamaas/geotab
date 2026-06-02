@@ -400,7 +400,9 @@ def extrair_status(credentials):
     driver_ids = set()
     for i, resultado in enumerate(res_viagens):
         did     = lista_ids[i]
-        viagens = resultado if isinstance(resultado, list) else resultado.get("result", [])
+        raw = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
+        # Filtra apenas dicts válidos — a API pode retornar strings ou erros inline.
+        viagens = [v for v in raw if isinstance(v, dict)]
         if not viagens:
             continue
 
@@ -418,14 +420,22 @@ def extrair_status(credentials):
             viagens_ord[0],
         )
 
-        driver_id = (viagem.get("driver") or {}).get("id") or ""
+        # "driver" pode vir como dict {"id": "b1"} ou como string "NoDriver".
+        driver_raw = viagem.get("driver")
+        if isinstance(driver_raw, dict):
+            driver_id = driver_raw.get("id") or ""
+        elif isinstance(driver_raw, str):
+            driver_id = driver_raw
+        else:
+            driver_id = ""
+
         motoristas_ativos[did] = {
             "driver_id":     driver_id,
             "viagem_inicio": viagem.get("start"),
             "viagem_fim":    viagem.get("stop"),
             "viagem_ativa":  not viagem.get("stopDurationTicks"),
         }
-        if driver_id and driver_id != "NoDriver":
+        if driver_id and driver_id not in ("NoDriver", "UnknownDriverId"):
             driver_ids.add(driver_id)
 
     info_motoristas = {}
