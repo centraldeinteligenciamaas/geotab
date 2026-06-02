@@ -52,6 +52,7 @@ def index():
             "status": "/status",
             "run":    "/run/<modo>  — modos: all, cadastro, status, comportamento, viagens",
         },
+        "obs": "viagens NÃO entra no 'all' — rode /run/viagens separadamente (job diário às 21h BRT)",
     })
 
 
@@ -133,7 +134,7 @@ scheduler.add_job(
     id="comportamento",
 )
 
-# Viagens: 21:00 BRT
+# Viagens: 21:00 BRT — job ISOLADO (não faz parte do 'all')
 scheduler.add_job(
     lambda: executar_sync("viagens"),
     CronTrigger(hour=21, minute=0, day_of_week="mon-fri", timezone=BRT),

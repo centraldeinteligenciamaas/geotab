@@ -108,7 +108,7 @@ def _com_retry(fn, tentativas=4, espera_base=5):
 
 
 def criar_tabelas(engine):
-    """Cria as 3 tabelas no Supabase se ainda não existirem.
+    """Cria as 4 tabelas no Supabase se ainda não existirem.
     Usa TIMESTAMP (sem timezone): os valores são gravados em BRT como estão."""
     ddl = """
         CREATE TABLE IF NOT EXISTS tb_cadastro (
@@ -795,7 +795,13 @@ def extrair_comportamento(credentials):
 # ─────────────────────────────────────────────────────────
 # TABELA 4 — VIAGENS  (base do Relatório de Viagem estilo SANEAGO)
 # ─────────────────────────────────────────────────────────
+# Janela de extração. Na PRIMEIRA carga use algo pequeno (ex.: VIAGENS_DIAS=7)
+# para validar rápido; depois aumente.
 VIAGENS_DIAS = int(os.environ.get("VIAGENS_DIAS", 30))
+
+# Reverse geocode (GetAddresses) dobra o volume de chamadas e é o trecho mais
+# lento. Desligue na primeira carga com VIAGENS_GEOCODE=0 e ligue depois.
+VIAGENS_GEOCODE = os.environ.get("VIAGENS_GEOCODE", "1") not in ("0", "false", "False", "")
 
 
 def _coord(ponto):
@@ -837,9 +843,11 @@ def reverse_geocode(credentials, coordenadas):
         return enderecos
 
     LOTE = 100
-    for ini in range(0, len(pedidos), LOTE):
+    total_lotes = (len(pedidos) + LOTE - 1) // LOTE
+    for n, ini in enumerate(range(0, len(pedidos), LOTE), start=1):
         sub_pedidos = pedidos[ini:ini + LOTE]
         sub_indices = indices[ini:ini + LOTE]
+        log.info(f"    → geocode lote {n}/{total_lotes} ({len(sub_pedidos)} coords)")
         resp = _post_geotab(
             "GetAddresses",
             {
@@ -860,14 +868,18 @@ def reverse_geocode(credentials, coordenadas):
 def extrair_viagens(credentials):
     """Uma linha por viagem (Trip) dos últimos VIAGENS_DIAS dias — base do
     Relatório de Viagem: partida/chegada, distância, hodômetro, velocidade,
-    endereços e motorista (nome + matrícula)."""
-    log.info(f"Extraindo viagens dos últimos {VIAGENS_DIAS} dias...")
+    endereços e motorista (nome + matrícula).
+
+    Roda APENAS no modo 'viagens' (não faz parte do 'all') — é o trecho mais
+    pesado do pipeline. Geocode controlado por VIAGENS_GEOCODE."""
+    log.info(f"Extraindo viagens dos últimos {VIAGENS_DIAS} dias (geocode={'on' if VIAGENS_GEOCODE else 'off'})...")
 
     veiculos   = geotab_get(credentials, "Device")
     lista_ids  = [v.get("id") for v in veiculos]
     serial_map = {v.get("id"): v.get("serialNumber", "") for v in veiculos}
     placa_map  = {v.get("id"): v.get("licensePlate", "") for v in veiculos}
     nome_map   = {v.get("id"): v.get("name", "")          for v in veiculos}
+    log.info(f"  • {len(lista_ids)} dispositivos — buscando Trips em lotes...")
 
     grupos = {g.get("id"): g.get("name", "") for g in geotab_get(credentials, "Group")}
     grupo_map, grupos_todos_map = {}, {}
@@ -908,6 +920,9 @@ def extrair_viagens(credentials):
                 driver_ids.add(drv["id"])
             elif isinstance(drv, str) and drv not in ("NoDriver", "UnknownDriverId"):
                 driver_ids.add(drv)
+
+    total_viagens = sum(len(v) for v in viagens_por_device.values())
+    log.info(f"  • {total_viagens} viagens brutas / {len(driver_ids)} motoristas distintos")
 
     info_motoristas = {}
     if driver_ids:
@@ -982,12 +997,15 @@ def extrair_viagens(credentials):
                 "atualizado_em":       agora_brt(),
             })
 
-    log.info(f"  • Geocodificando {len(rows)} viagens (partida + chegada)...")
-    end_partida = reverse_geocode(credentials, coords_partida)
-    end_chegada = reverse_geocode(credentials, coords_chegada)
-    for i, r in enumerate(rows):
-        r["end_partida"] = end_partida[i] if i < len(end_partida) else ""
-        r["end_chegada"] = end_chegada[i] if i < len(end_chegada) else ""
+    if VIAGENS_GEOCODE:
+        log.info(f"  • Geocodificando {len(rows)} viagens (partida + chegada)...")
+        end_partida = reverse_geocode(credentials, coords_partida)
+        end_chegada = reverse_geocode(credentials, coords_chegada)
+        for i, r in enumerate(rows):
+            r["end_partida"] = end_partida[i] if i < len(end_partida) else ""
+            r["end_chegada"] = end_chegada[i] if i < len(end_chegada) else ""
+    else:
+        log.info("  • Geocode DESLIGADO (VIAGENS_GEOCODE=0) — endereços em branco")
 
     df = pd.DataFrame(rows)
     log.info(f"  → {len(df)} viagens extraídas")
@@ -1024,7 +1042,9 @@ def main(modo=None):
             df = extrair_comportamento(credentials)
             gravar_tabela(df, "tb_comportamento", engine, chave_upsert="id")
 
-        if modo in ("all", "viagens"):
+        # IMPORTANTE: viagens NÃO entra no 'all' — só roda no modo explícito.
+        # É o trecho mais pesado (Trips por device + geocode) e travava o 'all'.
+        if modo == "viagens":
             df = extrair_viagens(credentials)
             gravar_tabela(df, "tb_viagens", engine, chave_upsert="id")
 
