@@ -898,6 +898,12 @@ VIAGENS_GEOCODE = os.environ.get("VIAGENS_GEOCODE", "1") not in ("0", "false", "
 # de memória limitado a um lote (essencial no free tier do Render, 512 MB).
 VIAGENS_DEVICE_LOTE = int(os.environ.get("VIAGENS_DEVICE_LOTE", 25))
 
+# Lookback (dias) para semear o ponto/hodômetro de PARTIDA da 1ª viagem de cada
+# device na janela. O Trip não traz coord de início — ela é o stopPoint da viagem
+# anterior; para a 1ª viagem da janela, buscamos a última viagem nos N dias que a
+# antecedem. 0 desliga o seed (a 1ª viagem fica sem endereço de partida).
+VIAGENS_SEED_DIAS = int(os.environ.get("VIAGENS_SEED_DIAS", 30))
+
 
 def _coord(ponto):
     """Extrai (lat, lon) de um StopPoint/Coordinate da Geotab (x=lon, y=lat)."""
@@ -921,6 +927,50 @@ def _duracao_para_segundos(valor):
         return int(n / 1e7) if n > 1e7 else int(n)
     except Exception:
         return 0
+
+
+def _buscar_pontos_anteriores(credentials, chunk_ids, data_inicio, lookback_dias):
+    """Para cada device, busca a ÚLTIMA viagem nos 'lookback_dias' que antecedem
+    data_inicio e devolve {did: {"coord": (lat, lon), "odo": km}}.
+
+    Serve para semear o ponto/hodômetro de partida da 1ª viagem da janela — que,
+    no modelo da Geotab, é a chegada (stopPoint) da viagem imediatamente anterior.
+    Devices sem viagem no período ficam fora do mapa (partida indefinida, como antes)."""
+    if lookback_dias <= 0:
+        return {}
+    desde = data_inicio - timedelta(days=lookback_dias)
+    resultados = multicall(credentials, [
+        {
+            "method": "Get",
+            "params": {
+                "typeName": "Trip",
+                "search": {
+                    "deviceSearch": {"id": did},
+                    "fromDate": desde.strftime(FMT),
+                    "toDate":   data_inicio.strftime(FMT),
+                },
+            },
+        }
+        for did in chunk_ids
+    ])
+    seeds = {}
+    for j, resultado in enumerate(resultados):
+        did = chunk_ids[j]
+        raw = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
+        viagens = [v for v in raw if isinstance(v, dict) and v.get("start")]
+        if not viagens:
+            continue
+        anterior = max(viagens, key=lambda v: v.get("start") or "")
+        lat, lon = _coord(anterior.get("stopPoint"))
+        if not (lat and lon):
+            continue
+        odo_m = anterior.get("odometer") or 0
+        seeds[did] = {
+            "coord": (lat, lon),
+            "odo":   round(odo_m / 1000, 2) if odo_m else None,
+        }
+    del resultados
+    return seeds
 
 
 def reverse_geocode(credentials, coordenadas):
@@ -960,9 +1010,15 @@ def reverse_geocode(credentials, coordenadas):
     return enderecos
 
 
-def _montar_viagem_row(v, did, maps, info_motoristas, odo_anterior):
-    """Monta a row de UMA viagem e devolve (row, lat_p, lon_p, lat_c, lon_c, novo_odo_anterior).
-    Mantém a continuidade do hodômetro via odo_anterior (encadeado por device)."""
+def _montar_viagem_row(v, did, maps, info_motoristas, odo_anterior, coord_anterior):
+    """Monta a row de UMA viagem e devolve
+    (row, lat_p, lon_p, lat_c, lon_c, novo_odo_anterior, novo_coord_anterior).
+    Mantém a continuidade do hodômetro via odo_anterior e do ponto de partida via
+    coord_anterior — ambos encadeados por device.
+
+    O objeto Trip da Geotab NÃO traz coordenada de início; só o stopPoint (chegada).
+    O ponto de partida de uma viagem é, portanto, o stopPoint da viagem anterior do
+    mesmo device (as viagens chegam ordenadas por start)."""
     start = v.get("start")
     stop  = v.get("stop")
 
@@ -983,8 +1039,10 @@ def _montar_viagem_row(v, did, maps, info_motoristas, odo_anterior):
     drv_id = drv.get("id") if isinstance(drv, dict) else (drv if isinstance(drv, str) else "")
     mot    = info_motoristas.get(drv_id, {})
 
-    lat_p, lon_p = v.get("latitude"), v.get("longitude")
+    # Chegada = stopPoint desta viagem. Partida = chegada da viagem anterior
+    # (Trip não traz coord de início). Na 1ª viagem do device, partida fica indefinida.
     lat_c, lon_c = _coord(v.get("stopPoint"))
+    lat_p, lon_p = coord_anterior if coord_anterior else (None, None)
 
     row = {
         "id":                  f"{did}|{start}",
@@ -1015,7 +1073,8 @@ def _montar_viagem_row(v, did, maps, info_motoristas, odo_anterior):
         "motorista_matricula": mot.get("matricula", ""),
         "atualizado_em":       agora_brt(),
     }
-    return row, lat_p, lon_p, lat_c, lon_c, odo_anterior
+    novo_coord_anterior = (lat_c, lon_c) if (lat_c and lon_c) else coord_anterior
+    return row, lat_p, lon_p, lat_c, lon_c, odo_anterior, novo_coord_anterior
 
 
 def sincronizar_viagens(credentials, engine):
@@ -1119,19 +1178,27 @@ def sincronizar_viagens(credentials, engine):
                         "matricula": u.get("employeeNo", ""),
                     }
 
+        # Semeia partida/hodômetro da 1ª viagem de cada device com a viagem
+        # imediatamente anterior à janela (stopPoint = ponto de partida).
+        seeds = _buscar_pontos_anteriores(
+            credentials, chunk_ids, data_inicio, VIAGENS_SEED_DIAS
+        )
+
         rows, coords_partida, coords_chegada = [], [], []
         for did in chunk_ids:
-            odo_anterior = None
+            seed = seeds.get(did, {})
+            odo_anterior = seed.get("odo")
+            coord_anterior = seed.get("coord")
             for v in viagens_por_device.get(did, []):
                 if not v.get("start"):
                     continue
-                row, lat_p, lon_p, lat_c, lon_c, odo_anterior = _montar_viagem_row(
-                    v, did, maps, info_motoristas, odo_anterior
+                row, lat_p, lon_p, lat_c, lon_c, odo_anterior, coord_anterior = _montar_viagem_row(
+                    v, did, maps, info_motoristas, odo_anterior, coord_anterior
                 )
                 rows.append(row)
                 coords_partida.append((lat_p, lon_p))
                 coords_chegada.append((lat_c, lon_c))
-        del viagens_por_device, info_motoristas
+        del viagens_por_device, info_motoristas, seeds
 
         if rows and VIAGENS_GEOCODE:
             log.info(f"    → geocodificando {len(rows)} viagens do lote...")
