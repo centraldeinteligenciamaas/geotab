@@ -160,6 +160,7 @@ def criar_tabelas(engine):
             id                       TEXT PRIMARY KEY,
             serial                   TEXT,
             placa                    TEXT,
+            todos_grupos             TEXT,
             excessos_velocidade_30d  INTEGER,
             aceleracoes_bruscas_30d  INTEGER,
             frenagens_bruscas_30d    INTEGER,
@@ -248,7 +249,10 @@ def criar_tabelas(engine):
         ALTER TABLE tb_status
             DROP COLUMN IF EXISTS odometro_inicio;
         ALTER TABLE tb_status
-            ADD COLUMN IF NOT EXISTS motorista_matricula TEXT;
+            ADD COLUMN IF NOT EXISTS motorista_matricula TEXT,
+            ADD COLUMN IF NOT EXISTS todos_grupos        TEXT;
+        ALTER TABLE tb_comportamento
+            ADD COLUMN IF NOT EXISTS todos_grupos TEXT;
         ALTER TABLE tb_viagens
             ADD COLUMN IF NOT EXISTS regional         TEXT,
             ADD COLUMN IF NOT EXISTS superintendencia TEXT;
@@ -525,6 +529,7 @@ def extrair_status(credentials):
     lista_ids  = [v.get("id") for v in veiculos]
     serial_map = {v.get("id"): v.get("serialNumber", "") for v in veiculos}
     placa_map  = {v.get("id"): v.get("licensePlate", "") for v in veiculos}
+    grupos_map = _mapa_todos_grupos(credentials, veiculos)
 
     status_map = {}
     for s in geotab_get(credentials, "DeviceStatusInfo"):
@@ -595,6 +600,7 @@ def extrair_status(credentials):
             "id":              did,
             "serial":          serial_map.get(did, ""),
             "placa":           placa_map.get(did, ""),
+            "todos_grupos":    grupos_map.get(did, ""),
             "comunicando":     s.get("isDeviceCommunicating", False),
             "ultimo_contato":  ts_brt(s.get("dateTime")),
             "latitude":        s.get("latitude")  or 0,
@@ -720,6 +726,7 @@ def extrair_comportamento(credentials):
     lista_ids  = [v.get("id") for v in veiculos]
     serial_map = {v.get("id"): v.get("serialNumber", "") for v in veiculos}
     placa_map  = {v.get("id"): v.get("licensePlate", "") for v in veiculos}
+    grupos_map = _mapa_todos_grupos(credentials, veiculos)
 
     todas_regras = geotab_get(
         credentials, "Rule",
@@ -877,6 +884,7 @@ def extrair_comportamento(credentials):
             "id":                      did,
             "serial":                  serial_map.get(did, ""),
             "placa":                   placa_map.get(did, ""),
+            "todos_grupos":            grupos_map.get(did, ""),
             "excessos_velocidade_30d": ev,
             "aceleracoes_bruscas_30d": ac,
             "frenagens_bruscas_30d":   fr,
