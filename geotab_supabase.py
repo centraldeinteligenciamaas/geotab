@@ -382,52 +382,91 @@ def _eh_erro_quota(resp):
     return "quota" in str(err.get("message", "")).lower()
 
 
+# Sessão HTTP reutilizada com cabeçalhos "de navegador". A API Geotab fica atrás
+# de um WAF (Cloudflare): requisições com o User-Agent padrão 'python-requests/x'
+# saindo de IPs de datacenter (ex.: Render) podem ser barradas com 403 + página
+# HTML (corpo não-JSON). Um UA de navegador + Accept/Content-Type evita esse filtro.
+_HTTP = requests.Session()
+_HTTP.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+})
+
+# Status HTTP tratados como falha TRANSITÓRIA (vale retry): bloqueios momentâneos
+# de WAF (403), rate-limit do edge (429) e indisponibilidades de servidor (5xx).
+RETRYABLE_HTTP = {403, 408, 429, 500, 502, 503, 504}
+
+
 def _post_geotab(method, params, contexto=""):
     """POST único e blindado para a API Geotab.
     - Pacing proativo de quota + retry reativo em OverLimitException.
+    - Retry em falhas TRANSITÓRIAS: erro de rede, corpo vazio/não-JSON e HTTP
+      403/429/5xx (bloqueio de WAF / rate-limit / servidor indisponível). Erros
+      definitivos (ex.: 401 credencial inválida) NÃO são repetidos.
     - Trata corpo vazio / não-JSON sem estourar JSONDecodeError.
-    - Loga status HTTP e início do corpo quando o parse falha.
     Retorna o dict da resposta JSON-RPC ({"result": ...} ou {"error": ...}),
     ou {"error": {...}} sintético em caso de falha de rede/parse."""
     unidades = len(params.get("calls", [])) if method == "ExecuteMultiCall" else 1
 
-    resp = None
+    ultima = None
     for tentativa in range(1, QUOTA_RETRY + 2):
         _consumir_quota(unidades)
         try:
-            r = requests.post(
+            r = _HTTP.post(
                 GEOTAB["servidor"],
                 json={"method": method, "params": params},
                 timeout=180,
             )
         except Exception as exc:
-            log.warning(f"  ⚠ Falha de rede em {method} {contexto}: {exc}")
-            return {"error": {"message": str(exc)}}
+            # Erro de rede: sem httpStatus → tratado como transitório.
+            ultima = {"error": {"message": str(exc)}}
+        else:
+            corpo = (r.text or "").strip()
+            if not corpo:
+                ultima = {"error": {"message": "corpo vazio", "httpStatus": r.status_code}}
+            else:
+                try:
+                    resp = r.json()
+                except ValueError:
+                    ultima = {"error": {
+                        "message": "resposta não-JSON",
+                        "httpStatus": r.status_code,
+                        "corpo": corpo[:120],
+                    }}
+                else:
+                    # Resposta JSON válida: só a quota pede retry; o resto é definitivo.
+                    if _eh_erro_quota(resp) and tentativa <= QUOTA_RETRY:
+                        espera = QUOTA_PAUSA * tentativa  # 12, 24, 36...
+                        log.warning(
+                            f"  ⏳ Quota excedida em {method} {contexto} — aguardando {espera}s "
+                            f"(retry {tentativa}/{QUOTA_RETRY})"
+                        )
+                        time.sleep(espera)
+                        continue
+                    return resp
 
-        corpo = (r.text or "").strip()
-        if not corpo:
-            log.warning(f"  ⚠ {method} {contexto} retornou corpo VAZIO (HTTP {r.status_code}).")
-            return {"error": {"message": "corpo vazio", "httpStatus": r.status_code}}
-        try:
-            resp = r.json()
-        except ValueError:
+        # Falha transitória (rede / corpo vazio / não-JSON). Repete se o status
+        # for transitório (ou desconhecido, no caso de erro de rede).
+        status = (ultima.get("error") or {}).get("httpStatus")
+        transitorio = status is None or status in RETRYABLE_HTTP
+        if transitorio and tentativa <= QUOTA_RETRY:
+            espera = min(QUOTA_PAUSA * tentativa, 30)
             log.warning(
-                f"  ⚠ {method} {contexto}: resposta não-JSON (HTTP {r.status_code}). "
-                f"Início do corpo: {corpo[:120]!r}"
-            )
-            return {"error": {"message": "resposta não-JSON", "httpStatus": r.status_code}}
-
-        if _eh_erro_quota(resp) and tentativa <= QUOTA_RETRY:
-            espera = QUOTA_PAUSA * tentativa  # 12, 24, 36...
-            log.warning(
-                f"  ⏳ Quota excedida em {method} {contexto} — aguardando {espera}s "
-                f"(retry {tentativa}/{QUOTA_RETRY})"
+                f"  ⏳ {method} {contexto}: falha transitória "
+                f"({ultima['error'].get('message')}, HTTP {status}) — "
+                f"retry {tentativa}/{QUOTA_RETRY} em {espera}s"
             )
             time.sleep(espera)
             continue
-        return resp
 
-    return resp
+        log.warning(f"  ⚠ {method} {contexto} falhou (definitivo): {ultima['error']}")
+        return ultima
+
+    return ultima
 
 
 def autenticar():
@@ -444,7 +483,26 @@ def autenticar():
         contexto="(login)",
     )
     if "error" in resp:
-        log.error(f"Falha na autenticação Geotab: {resp['error']}")
+        err    = resp["error"] if isinstance(resp["error"], dict) else {"message": resp["error"]}
+        status = err.get("httpStatus")
+        msg    = str(err.get("message", ""))
+
+        # Diagnóstico direcionado: 403 + corpo não-JSON = bloqueio de WAF (não é
+        # senha errada); 401/InvalidUser = credencial de fato inválida.
+        if status == 403 or (status is None and "não-JSON" in msg):
+            log.error(
+                "Falha na autenticação Geotab: BLOQUEIO DE WAF (HTTP 403, corpo não-JSON). "
+                "NÃO é credencial inválida — o edge (Cloudflare) barrou a requisição. "
+                "Provável bloqueio do IP de saída (datacenter/Render). "
+                "Ações: liberar o IP no MyGeotab/suporte ou usar IP de saída fixo/confiável."
+            )
+        elif status == 401 or "InvalidUserException" in msg or "incorrect" in msg.lower():
+            log.error(
+                "Falha na autenticação Geotab: CREDENCIAL INVÁLIDA (HTTP 401). "
+                "Verifique GEOTAB_DATABASE, GEOTAB_USERNAME e GEOTAB_PASSWORD."
+            )
+        else:
+            log.error(f"Falha na autenticação Geotab: {err}")
         sys.exit(1)
 
     resultado = resp["result"]
