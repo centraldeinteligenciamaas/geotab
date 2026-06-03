@@ -141,6 +141,7 @@ def criar_tabelas(engine):
             id               TEXT PRIMARY KEY,
             serial           TEXT,
             placa            TEXT,
+            todos_grupos     TEXT,
             comunicando      BOOLEAN,
             ultimo_contato   TIMESTAMP,
             latitude         DOUBLE PRECISION,
@@ -304,6 +305,17 @@ FMT = "%Y-%m-%dT%H:%M:%S.000Z"
 def sem_acento(texto: str) -> str:
     """Remove acentos para comparação de nomes de regras."""
     return unicodedata.normalize("NFD", texto).encode("ascii", "ignore").decode()
+
+
+def _mapa_todos_grupos(credentials, veiculos):
+    """{device_id: 'GrupoA | GrupoB | ...'} — nomes de TODOS os grupos do device.
+    Mesma semântica da coluna todos_grupos de tb_cadastro/tb_viagens."""
+    grupos = {g.get("id"): g.get("name", "") for g in geotab_get(credentials, "Group")}
+    mapa = {}
+    for v in veiculos:
+        gnomes = [grupos.get(g.get("id"), g.get("id")) for g in v.get("groups", [])]
+        mapa[v.get("id")] = " | ".join(gnomes)
+    return mapa
 
 
 def parse_nome_veiculo(nome: str) -> dict:
