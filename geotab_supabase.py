@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine.url import URL
+from sqlalchemy.pool import NullPool
 
 BRT = ZoneInfo("America/Sao_Paulo")
 
@@ -91,13 +92,15 @@ def criar_engine():
         database=cfg["banco"],
         query={"sslmode": "require"},
     )
-    # pool_size=1: syncs rodam sequencialmente (lock no app.py) — não há concorrência.
-    # pool_pre_ping detecta conexões mortas após períodos de inatividade no servidor.
+    # NullPool: o app NUNCA segura conexão ociosa — cada checkout abre uma conexão
+    # nova e a fecha ao devolver. No pooler do Supabase em TRANSACTION mode (porta
+    # 6543) isso é barato (o pooler multiplexa muitos clientes sobre poucas conexões
+    # de servidor). Evita o "max clients reached in session mode" que estourava o
+    # limite de 15 do session mode (porta 5432), onde cada conexão segura um slot.
+    # Os syncs rodam sequencialmente (lock no app.py) — não há concorrência real.
     return create_engine(
         url,
-        pool_pre_ping=True,
-        pool_size=1,
-        max_overflow=0,
+        poolclass=NullPool,
         connect_args={"connect_timeout": 30},
     )
 
