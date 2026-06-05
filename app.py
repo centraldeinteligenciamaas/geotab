@@ -24,6 +24,28 @@ _estado = {
     "ultimo_erro": None,
 }
 
+# (modo, hora, minuto) — um job por tabela, 1x ao dia, seg-sex (horário BRT).
+# Fonte única de verdade: usada tanto para agendar os jobs quanto para calcular
+# a próxima execução exibida em /status.
+AGENDA = [
+    ("cadastro",      4, 0),   # 04:00 — leve
+    ("status",        5, 0),   # 05:00 — leve
+    ("comportamento", 6, 0),   # 06:00 — pesado (eventos 30d + odômetro)
+    ("viagens",      21, 0),   # 21:00 — mais pesado (Trips por device + geocode)
+]
+
+
+def _proximas_execucoes():
+    """Próxima execução de cada modo, calculada a partir da AGENDA e da hora
+    atual. Determinístico e independente do estado em memória do scheduler."""
+    agora = datetime.now(tz=BRT)
+    prox = {}
+    for modo, hora, minuto in AGENDA:
+        trigger = CronTrigger(hour=hora, minute=minuto, day_of_week="mon-fri", timezone=BRT)
+        nxt = trigger.get_next_fire_time(None, agora)
+        prox[modo] = nxt.astimezone(BRT).strftime("%Y-%m-%d %H:%M:%S") if nxt else None
+    return prox
+
 
 def executar_sync(modo):
     if not _lock.acquire(blocking=False):
@@ -88,11 +110,11 @@ def status():
     except Exception as exc:
         log.error(f"Erro ao consultar últimas atualizações: {exc}")
 
-    proximos = {
-        job.id: job.next_run_time.astimezone(BRT).strftime("%Y-%m-%d %H:%M:%S")
-        for job in scheduler.get_jobs()
-        if job.next_run_time
-    }
+    # Próxima execução calculada de forma determinística a partir da AGENDA +
+    # hora atual. NÃO usamos job.next_run_time porque ele vive só na memória do
+    # scheduler e é perdido a cada spin-down/restart do free tier — o que fazia
+    # a "próxima execução" ficar congelada num horário já passado.
+    proximos = _proximas_execucoes()
 
     return jsonify({
         "em_execucao": _estado["em_execucao"],
@@ -126,13 +148,7 @@ def run_sync(modo):
 # concorrência, mas o espaçamento evita disputa de memória).
 scheduler = BackgroundScheduler(timezone=BRT)
 
-# (modo, hora, minuto) — um job por tabela, 1x ao dia.
-AGENDA = [
-    ("cadastro",      4, 0),   # 04:00 — leve
-    ("status",        5, 0),   # 05:00 — leve
-    ("comportamento", 6, 0),   # 06:00 — pesado (eventos 30d + odômetro)
-    ("viagens",      21, 0),   # 21:00 — mais pesado (Trips por device + geocode)
-]
+# AGENDA é definida no topo do módulo (fonte única, compartilhada com /status).
 for _modo, _hora, _minuto in AGENDA:
     scheduler.add_job(
         lambda m=_modo: executar_sync(m),
