@@ -1,6 +1,14 @@
 -- Views do projeto Geotab -> Supabase (geradas do banco)
 -- Coluna todos_grupos adicionada em status, comportamento, resumo_frota e indicadores.
 -- Em vw_indicadores_produtividade o agrupamento passou a ser por todos_grupos.
+--
+-- Períodos de cada view (todas expõem datas):
+--   vw_cadastro                  snapshot atual           (atualizado_em)
+--   vw_status                    tempo real / snapshot     (snapshot_em, ultimo_contato)
+--   vw_comportamento             últimos 6 meses           (periodo_ini, periodo_fim)
+--   vw_relatorio_viagens         ano corrente (por viagem) (data_partida, data_chegada, atualizado_em)
+--   vw_resumo_frota              ano corrente              (data_ini, data_fim)
+--   vw_indicadores_produtividade ano corrente              (data_ini, data_fim)
 
 -- ============================================================
 -- vw_cadastro
@@ -52,10 +60,10 @@ CREATE OR REPLACE VIEW vw_comportamento AS
  SELECT cmp.id,
     cmp.serial,
     cmp.placa,
-    cmp.excessos_velocidade_30d,
-    cmp.aceleracoes_bruscas_30d,
-    cmp.frenagens_bruscas_30d,
-    cmp.curvas_drasticas_30d,
+    cmp.excessos_velocidade_6m,
+    cmp.aceleracoes_bruscas_6m,
+    cmp.frenagens_bruscas_6m,
+    cmp.curvas_drasticas_6m,
     cmp.ultimo_excesso_vel,
     cmp.ultima_acel_brusca,
     cmp.ultima_fren_brusca,
@@ -63,6 +71,9 @@ CREATE OR REPLACE VIEW vw_comportamento AS
     cmp.score_risco,
     cmp.odometro,
     cmp.atualizado_em,
+    -- Janela dos contadores *_6m: 6 meses até o momento da extração.
+    (cmp.atualizado_em - '6 mons'::interval) AS periodo_ini,
+    cmp.atualizado_em AS periodo_fim,
     cmp.odometro_gps,
     cmp.todos_grupos
    FROM tb_comportamento cmp
@@ -89,7 +100,8 @@ CREATE OR REPLACE VIEW vw_relatorio_viagens AS
     end_partida,
     end_chegada,
     motorista_nome,
-    motorista_matricula
+    motorista_matricula,
+    atualizado_em
    FROM tb_viagens v
   ORDER BY placa, data_partida;
 
@@ -98,11 +110,13 @@ CREATE OR REPLACE VIEW vw_relatorio_viagens AS
 -- ============================================================
 CREATE OR REPLACE VIEW vw_resumo_frota AS
  WITH params AS (
-         SELECT CURRENT_DATE - '30 days'::interval AS data_ini,
+         SELECT date_trunc('year', CURRENT_DATE)::timestamp without time zone AS data_ini,
             CURRENT_DATE::timestamp without time zone AS data_fim
         )
  SELECT v.placa,
     v.grupo AS uo_lotacao,
+    p.data_ini,
+    p.data_fim,
     EXTRACT(day FROM p.data_fim - p.data_ini)::integer AS dias_no_periodo,
     count(DISTINCT v.data_partida::date) AS dias_utilizados,
     round(sum(v.distancia_km)::numeric, 1) AS km_rodado,
@@ -121,7 +135,7 @@ CREATE OR REPLACE VIEW vw_resumo_frota AS
 -- ============================================================
 CREATE OR REPLACE VIEW vw_indicadores_produtividade AS
  WITH params AS (
-         SELECT CURRENT_DATE - '30 days'::interval AS data_ini,
+         SELECT date_trunc('year', CURRENT_DATE)::timestamp without time zone AS data_ini,
             CURRENT_DATE::timestamp without time zone AS data_fim
         ), por_veiculo AS (
          SELECT v.grupo AS uo_lotacao,
@@ -130,13 +144,17 @@ CREATE OR REPLACE VIEW vw_indicadores_produtividade AS
             sum(v.distancia_km) AS km_veiculo,
             sum(v.duracao_segundos) AS seg_veiculo,
             count(DISTINCT v.data_partida::date) AS dias_utilizados,
-            EXTRACT(day FROM p.data_fim - p.data_ini) AS dias_periodo
+            EXTRACT(day FROM p.data_fim - p.data_ini) AS dias_periodo,
+            p.data_ini,
+            p.data_fim
            FROM tb_viagens v
              CROSS JOIN params p
           WHERE v.data_partida >= p.data_ini AND v.data_partida <= p.data_fim
           GROUP BY v.grupo, v.todos_grupos, v.placa, p.data_ini, p.data_fim
         )
  SELECT uo_lotacao,
+    min(data_ini) AS data_ini,
+    max(data_fim) AS data_fim,
     count(*) AS qtd_veiculos,
     round(sum(km_veiculo)::numeric, 0) AS km_total,
     round((sum(km_veiculo) / NULLIF(count(*), 0)::double precision)::numeric, 0) AS media_km_veiculo,

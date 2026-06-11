@@ -30,7 +30,7 @@ _estado = {
 AGENDA = [
     ("cadastro",      4, 0),   # 04:00 — leve
     ("status",        5, 0),   # 05:00 — leve
-    ("comportamento", 6, 0),   # 06:00 — pesado (eventos 30d + odômetro)
+    ("comportamento", 6, 0),   # 06:00 — incremental (buckets 6m); 1ª vez = backfill
     ("viagens",      21, 0),   # 21:00 — mais pesado (Trips por device + geocode)
 ]
 

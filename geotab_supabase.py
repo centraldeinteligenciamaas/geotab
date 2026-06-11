@@ -2,6 +2,7 @@ import os
 import gc
 import sys
 import time
+import calendar
 import logging
 import threading
 import collections
@@ -65,6 +66,11 @@ DIAG_ODO_FISICO = [
 # milhares de leituras em 30 dias; lote menor = menos leituras seguradas por vez
 # = menor pico de memória (essencial no free tier do Render, 512 MB).
 ODO_LOTE = int(os.environ.get("GEOTAB_ODO_LOTE", 25))
+
+# Janela (dias) do odômetro no modo INCREMENTAL do comportamento. O odômetro é
+# monotônico: basta a leitura mais recente. Quem não reportou nessa janela curta
+# mantém o valor anterior (max-merge). No backfill usamos os 6 meses + fallback.
+ODO_INCREMENTAL_DIAS = int(os.environ.get("GEOTAB_ODO_INCREMENTAL_DIAS", 7))
 
 
 # ─────────────────────────────────────────────────────────
@@ -161,10 +167,10 @@ def criar_tabelas(engine):
             serial                   TEXT,
             placa                    TEXT,
             todos_grupos             TEXT,
-            excessos_velocidade_30d  INTEGER,
-            aceleracoes_bruscas_30d  INTEGER,
-            frenagens_bruscas_30d    INTEGER,
-            curvas_drasticas_30d     INTEGER,
+            excessos_velocidade_6m   INTEGER,
+            aceleracoes_bruscas_6m   INTEGER,
+            frenagens_bruscas_6m     INTEGER,
+            curvas_drasticas_6m      INTEGER,
             ultimo_excesso_vel       TIMESTAMP,
             ultima_acel_brusca       TIMESTAMP,
             ultima_fren_brusca       TIMESTAMP,
@@ -206,6 +212,20 @@ def criar_tabelas(engine):
         );
         CREATE INDEX IF NOT EXISTS ix_viagens_device  ON tb_viagens (device_id);
         CREATE INDEX IF NOT EXISTS ix_viagens_partida ON tb_viagens (data_partida);
+
+        -- Buckets diários de eventos de comportamento (1 linha por device/dia/tipo).
+        -- Fonte incremental de tb_comportamento: contamos só os dias novos e somamos
+        -- os últimos 6 meses para reconstruir os contadores *_6m. A janela móvel é
+        -- mantida apagando buckets fora dos 6 meses.
+        CREATE TABLE IF NOT EXISTS tb_comportamento_eventos (
+            device_id   TEXT,
+            dia         DATE,
+            tipo        TEXT,
+            qtd         INTEGER,
+            ultimo_ts   TIMESTAMP,
+            PRIMARY KEY (device_id, dia, tipo)
+        );
+        CREATE INDEX IF NOT EXISTS ix_comp_eventos_dia ON tb_comportamento_eventos (dia);
     """
     # Migra colunas existentes de TIMESTAMPTZ → TIMESTAMP (converte UTC → BRT)
     migrar = """
@@ -256,6 +276,25 @@ def criar_tabelas(engine):
         ALTER TABLE tb_viagens
             ADD COLUMN IF NOT EXISTS regional         TEXT,
             ADD COLUMN IF NOT EXISTS superintendencia TEXT;
+        -- Renomeia os contadores _30d → _6m (janela passou de 30 dias p/ 6 meses).
+        DO $$ BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name='tb_comportamento' AND column_name='excessos_velocidade_30d') THEN
+                ALTER TABLE tb_comportamento RENAME COLUMN excessos_velocidade_30d TO excessos_velocidade_6m;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name='tb_comportamento' AND column_name='aceleracoes_bruscas_30d') THEN
+                ALTER TABLE tb_comportamento RENAME COLUMN aceleracoes_bruscas_30d TO aceleracoes_bruscas_6m;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name='tb_comportamento' AND column_name='frenagens_bruscas_30d') THEN
+                ALTER TABLE tb_comportamento RENAME COLUMN frenagens_bruscas_30d TO frenagens_bruscas_6m;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name='tb_comportamento' AND column_name='curvas_drasticas_30d') THEN
+                ALTER TABLE tb_comportamento RENAME COLUMN curvas_drasticas_30d TO curvas_drasticas_6m;
+            END IF;
+        END $$;
     """
     def _executar():
         with engine.begin() as conn:
@@ -722,7 +761,7 @@ def _max_diag_em_lotes(credentials, lista_ids, diag_id, ini, fim, lote=ODO_LOTE)
 
 
 def _com_fallback_ano(credentials, lista_ids, diag_id, data_inicio, mapa_raw):
-    """Para devices sem leitura nos 30 dias, busca no ano anterior."""
+    """Para devices sem leitura na janela, busca no ano anterior."""
     sem_dado = [did for did, v in mapa_raw.items() if not v]
     if not sem_dado:
         return
@@ -735,25 +774,30 @@ def _com_fallback_ano(credentials, lista_ids, diag_id, data_inicio, mapa_raw):
     log.info(f"    → {recuperados}/{len(sem_dado)} recuperados no fallback 1 ano")
 
 
-def buscar_odo_gps(credentials, lista_ids, data_inicio, data_fim):
+def buscar_odo_gps(credentials, lista_ids, data_inicio, data_fim, usar_fallback=True):
     """Retorna {device_id: km} via GPS (DiagnosticDeviceTotalDistanceId).
-    Valores sempre em metros → divide por 1000."""
+    Valores sempre em metros → divide por 1000.
+    usar_fallback=False pula a busca de 1 ano (modo incremental: janela curta,
+    devices sem leitura mantêm o valor anterior via max-merge no chamador)."""
     log.info(f"  • GPS odômetro via '{DIAG_GPS}'...")
     mapa_raw = _max_diag_em_lotes(credentials, lista_ids, DIAG_GPS, data_inicio, data_fim)
-    _com_fallback_ano(credentials, lista_ids, DIAG_GPS, data_inicio, mapa_raw)
+    if usar_fallback:
+        _com_fallback_ano(credentials, lista_ids, DIAG_GPS, data_inicio, mapa_raw)
     mapa_km = {did: round(v / 1000, 2) if v else 0.0 for did, v in mapa_raw.items()}
     com_dado = sum(1 for v in mapa_km.values() if v > 0)
     log.info(f"    → {com_dado}/{len(lista_ids)} veículos com dado GPS")
     return mapa_km
 
 
-def buscar_odo_fisico(credentials, lista_ids, data_inicio, data_fim):
+def buscar_odo_fisico(credentials, lista_ids, data_inicio, data_fim, usar_fallback=True):
     """Retorna {device_id: km} via OBD2 (odômetro físico do veículo).
-    Testa DIAG_ODO_FISICO em ordem; unidade inferida automaticamente por _inferir_km."""
+    Testa DIAG_ODO_FISICO em ordem; unidade inferida automaticamente por _inferir_km.
+    usar_fallback=False pula a busca de 1 ano (modo incremental)."""
     for diag_id in DIAG_ODO_FISICO:
         log.info(f"  • Odômetro físico via '{diag_id}'...")
         mapa_raw = _max_diag_em_lotes(credentials, lista_ids, diag_id, data_inicio, data_fim)
-        _com_fallback_ano(credentials, lista_ids, diag_id, data_inicio, mapa_raw)
+        if usar_fallback:
+            _com_fallback_ano(credentials, lista_ids, diag_id, data_inicio, mapa_raw)
 
         mapa_km     = {did: _inferir_km(v) for did, v in mapa_raw.items()}
         encontrados = sum(1 for v in mapa_km.values() if v > 0)
@@ -777,24 +821,46 @@ def buscar_odo_fisico(credentials, lista_ids, data_inicio, data_fim):
 # ─────────────────────────────────────────────────────────
 # TABELA 3 — COMPORTAMENTO
 # ─────────────────────────────────────────────────────────
-def extrair_comportamento(credentials):
-    log.info("Extraindo eventos de comportamento (30 dias)...")
+def _meses_atras(dt, n):
+    """Subtrai n meses de calendário de dt, com guarda p/ dia inexistente
+    (ex.: 31 de mês → mês com 30/28 dias). Mantém hora/min/seg."""
+    mes = dt.month - n
+    ano = dt.year
+    while mes <= 0:
+        mes += 12
+        ano -= 1
+    ultimo_dia = calendar.monthrange(ano, mes)[1]
+    return dt.replace(year=ano, month=mes, day=min(dt.day, ultimo_dia))
 
-    veiculos   = geotab_get(credentials, "Device")
-    lista_ids  = [v.get("id") for v in veiculos]
-    serial_map = {v.get("id"): v.get("serialNumber", "") for v in veiculos}
-    placa_map  = {v.get("id"): v.get("licensePlate", "") for v in veiculos}
-    grupos_map = _mapa_todos_grupos(credentials, veiculos)
 
+# Os 4 tipos de evento, na ordem usada em todo o módulo (chave dos buckets).
+TIPOS_EVENTO = ["excesso_velocidade", "aceleracao_brusca", "frenagem_brusca", "curva_drastica"]
+
+
+def _dia_ts_brt(iso_utc):
+    """A partir de um ISO UTC da Geotab ('2024-06-01T12:34:56.000Z') devolve
+    ('YYYY-MM-DD' em BRT, datetime naive BRT). Brasil sem horário de verão desde
+    2019 → offset fixo UTC-3. Retorna (None, None) se a string for inválida."""
+    if not iso_utc or len(iso_utc) < 19:
+        return None, None
+    try:
+        dt_utc = datetime.strptime(iso_utc[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None, None
+    dt_brt = dt_utc - timedelta(hours=3)
+    return dt_brt.strftime("%Y-%m-%d"), dt_brt
+
+
+def _identificar_regras(credentials):
+    """Devolve (ids_velocidade, regras_simples) resolvendo nomes/ids das regras
+    Geotab para cada tipo de evento de comportamento."""
     todas_regras = geotab_get(
         credentials, "Rule",
         search={"fromDate": "2000-01-01T00:00:00.000Z"}
     )
 
-    # ── Mapeamento de tipos → lista de IDs de regras ────────────────────────
     TERMOS_VELOCIDADE     = {"excesso velocidade"}
     IDS_VELOCIDADE_PADRAO = {"RuleSpeedingId", "RulePostedSpeedingId"}
-
     TIPOS_SIMPLES = {
         "aceleracao_brusca": (
             {"RuleHarshAccelerationId", "RuleJackrabbitStartsId"},
@@ -827,33 +893,185 @@ def extrair_comportamento(credentials):
         )
         log.info(f"  • Regra '{tipo}' → {regras_simples[tipo]}")
 
-    data_fim    = agora_brt()
-    data_inicio = data_fim - timedelta(days=30)
+    return ids_velocidade, regras_simples
 
-    # ── Odômetro GPS (distância acumulada pelo device desde instalação) ────────
-    odo_gps_map = buscar_odo_gps(credentials, lista_ids, data_inicio, data_fim)
 
-    # ── Odômetro físico (OBD2 — odômetro real do veículo, se disponível) ───
-    odo_fisico_map = buscar_odo_fisico(credentials, lista_ids, data_inicio, data_fim)
+def _ler_ultimo_dia_buckets(engine):
+    """Maior 'dia' já presente em tb_comportamento_eventos (date) ou None se vazia."""
+    def _exec():
+        with engine.connect() as conn:
+            return conn.execute(
+                text("SELECT MAX(dia) FROM tb_comportamento_eventos")
+            ).scalar()
+    return _com_retry(_exec)
 
-    # ── Contadores de eventos ───────────────────────────────────────────────
-    contadores = {
-        did: {
-            "excesso_velocidade": 0, "ultimo_excesso":    None,
-            "aceleracao_brusca":  0, "ultima_aceleracao": None,
-            "frenagem_brusca":    0, "ultima_frenagem":   None,
-            "curva_drastica":     0, "ultima_curva":      None,
-        }
-        for did in lista_ids
-    }
-    CAMPO_ULTIMO = {
-        "excesso_velocidade": "ultimo_excesso",
-        "aceleracao_brusca":  "ultima_aceleracao",
-        "frenagem_brusca":    "ultima_frenagem",
-        "curva_drastica":     "ultima_curva",
-    }
 
-    def processar_eventos(eventos, tipo, chave_ultimo):
+def _upsert_buckets(engine, buckets):
+    """Grava/atualiza os buckets {(did, dia, tipo): {qtd, ultimo_ts}}.
+    Re-sincronizações de um dia já existente SOBRESCREVEM a contagem (o dia é
+    recontado por inteiro), então o ON CONFLICT usa o valor novo."""
+    if not buckets:
+        log.info("  • Nenhum bucket novo de evento.")
+        return
+    df = pd.DataFrame([
+        {"device_id": did, "dia": dia, "tipo": tipo,
+         "qtd": v["qtd"], "ultimo_ts": v["ultimo_ts"]}
+        for (did, dia, tipo), v in buckets.items()
+    ])
+
+    def _exec():
+        with engine.begin() as conn:
+            df.to_sql("tmp_comp_eventos", conn, if_exists="replace", index=False, chunksize=5000)
+            conn.execute(text("""
+                INSERT INTO tb_comportamento_eventos (device_id, dia, tipo, qtd, ultimo_ts)
+                SELECT device_id, dia::date, tipo, qtd, ultimo_ts FROM tmp_comp_eventos
+                ON CONFLICT (device_id, dia, tipo)
+                DO UPDATE SET qtd = EXCLUDED.qtd, ultimo_ts = EXCLUDED.ultimo_ts
+            """))
+            conn.execute(text("DROP TABLE IF EXISTS tmp_comp_eventos"))
+
+    _com_retry(_exec)
+    log.info(f"  ✓ {len(df)} buckets (device/dia/tipo) gravados.")
+
+
+def _limpar_buckets_antigos(engine, limite_dia):
+    """Apaga buckets anteriores a limite_dia ('YYYY-MM-DD') — mantém a janela móvel
+    de 6 meses e impede a tabela de crescer indefinidamente."""
+    def _exec():
+        with engine.begin() as conn:
+            r = conn.execute(
+                text("DELETE FROM tb_comportamento_eventos WHERE dia < :lim::date"),
+                {"lim": limite_dia},
+            )
+            return r.rowcount
+    apagados = _com_retry(_exec)
+    log.info(f"  ✓ {apagados} buckets fora da janela (dia < {limite_dia}) removidos.")
+
+
+def _ler_odo_anterior(engine):
+    """{device_id: (odometro_fisico, odometro_gps)} já gravados em tb_comportamento.
+    Usado no incremental para manter o valor de quem não reportou na janela curta."""
+    def _exec():
+        with engine.connect() as conn:
+            return conn.execute(
+                text("SELECT id, odometro, odometro_gps FROM tb_comportamento")
+            ).all()
+    rows = _com_retry(_exec)
+    return {r[0]: (r[1] or 0, r[2] or 0) for r in rows}
+
+
+def _reconstruir_comportamento(engine, base_rows, janela_ini, agora):
+    """Reconstrói tb_comportamento somando os buckets dos últimos 6 meses
+    (dia >= janela_ini) por device/tipo e juntando serial/placa/grupos/odômetro
+    vindos de base_rows. Faz upsert por id."""
+    base_df = pd.DataFrame(base_rows)
+
+    def _exec():
+        with engine.begin() as conn:
+            base_df.to_sql("tmp_comp_base", conn, if_exists="replace", index=False, chunksize=2000)
+            conn.execute(text("""
+                INSERT INTO tb_comportamento (
+                    id, serial, placa, todos_grupos,
+                    excessos_velocidade_6m, aceleracoes_bruscas_6m,
+                    frenagens_bruscas_6m, curvas_drasticas_6m,
+                    ultimo_excesso_vel, ultima_acel_brusca,
+                    ultima_fren_brusca, ultima_curva_drastica,
+                    score_risco, odometro, odometro_gps, atualizado_em
+                )
+                SELECT
+                    b.device_id, b.serial, b.placa, b.todos_grupos,
+                    COALESCE(ev.qtd,0), COALESCE(ac.qtd,0),
+                    COALESCE(fr.qtd,0), COALESCE(cu.qtd,0),
+                    ev.ultimo, ac.ultimo, fr.ultimo, cu.ultimo,
+                    COALESCE(ev.qtd,0)*3 + COALESCE(ac.qtd,0)*2
+                        + COALESCE(fr.qtd,0)*2 + COALESCE(cu.qtd,0)*1,
+                    b.odometro, b.odometro_gps, :agora
+                FROM tmp_comp_base b
+                LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
+                           FROM tb_comportamento_eventos
+                           WHERE dia >= :ini::date AND tipo='excesso_velocidade'
+                           GROUP BY device_id) ev ON ev.device_id = b.device_id
+                LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
+                           FROM tb_comportamento_eventos
+                           WHERE dia >= :ini::date AND tipo='aceleracao_brusca'
+                           GROUP BY device_id) ac ON ac.device_id = b.device_id
+                LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
+                           FROM tb_comportamento_eventos
+                           WHERE dia >= :ini::date AND tipo='frenagem_brusca'
+                           GROUP BY device_id) fr ON fr.device_id = b.device_id
+                LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
+                           FROM tb_comportamento_eventos
+                           WHERE dia >= :ini::date AND tipo='curva_drastica'
+                           GROUP BY device_id) cu ON cu.device_id = b.device_id
+                ON CONFLICT (id) DO UPDATE SET
+                    serial=EXCLUDED.serial, placa=EXCLUDED.placa,
+                    todos_grupos=EXCLUDED.todos_grupos,
+                    excessos_velocidade_6m=EXCLUDED.excessos_velocidade_6m,
+                    aceleracoes_bruscas_6m=EXCLUDED.aceleracoes_bruscas_6m,
+                    frenagens_bruscas_6m=EXCLUDED.frenagens_bruscas_6m,
+                    curvas_drasticas_6m=EXCLUDED.curvas_drasticas_6m,
+                    ultimo_excesso_vel=EXCLUDED.ultimo_excesso_vel,
+                    ultima_acel_brusca=EXCLUDED.ultima_acel_brusca,
+                    ultima_fren_brusca=EXCLUDED.ultima_fren_brusca,
+                    ultima_curva_drastica=EXCLUDED.ultima_curva_drastica,
+                    score_risco=EXCLUDED.score_risco,
+                    odometro=EXCLUDED.odometro, odometro_gps=EXCLUDED.odometro_gps,
+                    atualizado_em=EXCLUDED.atualizado_em
+            """), {"ini": janela_ini, "agora": agora})
+            conn.execute(text("DROP TABLE IF EXISTS tmp_comp_base"))
+
+    _com_retry(_exec)
+    log.info(f"  ✓ tb_comportamento reconstruída de {len(base_df)} devices.")
+
+
+def sincronizar_comportamento(credentials, engine):
+    """Sincroniza o comportamento (janela móvel de 6 meses) de forma incremental.
+
+    1ª execução (tb_comportamento_eventos vazia) = BACKFILL: conta os 6 meses
+    inteiros. Execuções seguintes = INCREMENTAL: recontam só do último dia já
+    gravado (que pode ter ficado parcial) até agora. Os eventos viram buckets
+    diários (device/dia/tipo); tb_comportamento é então reconstruída somando os
+    buckets dos últimos 6 meses. Buckets fora da janela são apagados."""
+    log.info("Sincronizando comportamento (6 meses, incremental por buckets diários)...")
+
+    veiculos   = geotab_get(credentials, "Device")
+    lista_ids  = [v.get("id") for v in veiculos]
+    ids_set    = set(lista_ids)
+    serial_map = {v.get("id"): v.get("serialNumber", "") for v in veiculos}
+    placa_map  = {v.get("id"): v.get("licensePlate", "") for v in veiculos}
+    grupos_map = _mapa_todos_grupos(credentials, veiculos)
+
+    ids_velocidade, regras_simples = _identificar_regras(credentials)
+
+    data_fim       = agora_brt()
+    janela_ini     = _meses_atras(data_fim, 6)
+    janela_ini_str = janela_ini.strftime("%Y-%m-%d")
+
+    ultimo_dia = _ler_ultimo_dia_buckets(engine)
+    if ultimo_dia is None:
+        backfill = True
+        desde    = janela_ini
+        log.info(f"  • BACKFILL (carga única): {janela_ini:%Y-%m-%d} → {data_fim:%Y-%m-%d}")
+    else:
+        backfill = False
+        # Reconta desde 00:00 do último dia gravado (pode ter ficado parcial),
+        # nunca antes do início da janela de 6 meses.
+        desde = datetime.combine(ultimo_dia, datetime.min.time())
+        if desde < janela_ini:
+            desde = janela_ini
+        log.info(f"  • INCREMENTAL: {desde:%Y-%m-%d} → {data_fim:%Y-%m-%d} (último dia gravado: {ultimo_dia})")
+
+    # Dia-piso da contagem. A busca na Geotab usa horário BRT rotulado como UTC
+    # (convenção do módulo), o que alcança ~3h a mais para trás e "vaza" eventos
+    # para o dia anterior. Descartamos buckets antes do piso para não sobrescrever
+    # com contagem parcial um dia anterior já completo (no backfill o que sobrar
+    # antes da janela é removido por _limpar_buckets_antigos).
+    floor_dia = desde.strftime("%Y-%m-%d")
+
+    # ── Conta eventos em buckets diários {(did, 'YYYY-MM-DD', tipo): {qtd, ultimo_ts}} ──
+    buckets = {}
+
+    def processar(eventos, tipo):
         contados, ignorados = 0, 0
         for ev in eventos:
             did = (
@@ -861,28 +1079,35 @@ def extrair_comportamento(credentials):
                 if isinstance(ev.get("device"), dict)
                 else ev.get("device")
             )
-            if not did or did not in contadores:
+            if not did or did not in ids_set:
                 ignorados += 1
                 continue
-            contadores[did][tipo] += 1
+            dia, ts = _dia_ts_brt(ev.get("activeFrom") or ev.get("dateTime"))
+            if dia is None:
+                ignorados += 1
+                continue
+            if dia < floor_dia:
+                continue  # vazamento de fuso p/ dia anterior já consolidado
+            k = (did, dia, tipo)
+            b = buckets.get(k)
+            if b is None:
+                buckets[k] = {"qtd": 1, "ultimo_ts": ts}
+            else:
+                b["qtd"] += 1
+                if ts > b["ultimo_ts"]:
+                    b["ultimo_ts"] = ts
             contados += 1
-            data_ev = ev.get("activeFrom") or ev.get("dateTime")
-            if data_ev:
-                atual = contadores[did][chave_ultimo]
-                if atual is None or data_ev > atual:
-                    contadores[did][chave_ultimo] = data_ev
         return contados, ignorados
 
     # Teto por chamada da Geotab. Quando atingido, a janela é fracionada — assim
     # NENHUM evento é perdido (contagem completa) e cada chamada continua leve.
-    LIMIT     = 50000
+    LIMIT      = 50000
     MIN_JANELA = timedelta(minutes=5)  # piso do fracionamento recursivo
 
-    def contar_regra(rid, tipo, chave_ultimo, ini, fim):
-        """Conta TODOS os eventos da regra em [ini, fim].
-        Se a janela satura (>= LIMIT eventos = sinal de truncamento), divide pela
-        metade e recursa — garantindo a contagem completa sem nunca segurar mais
-        que uma sub-janela em memória. Retorna (total, contados, ignorados)."""
+    def contar_regra(rid, tipo, ini, fim):
+        """Conta TODOS os eventos da regra em [ini, fim] para buckets diários.
+        Se a janela satura (>= LIMIT), divide pela metade e recursa. Retorna
+        (total, contados, ignorados)."""
         eventos = geotab_get(
             credentials, "ExceptionEvent",
             search={
@@ -895,12 +1120,11 @@ def extrair_comportamento(credentials):
         n = len(eventos)
 
         if n >= LIMIT and (fim - ini) > MIN_JANELA:
-            # Saturou: libera esta leitura e fraciona a janela pela metade.
             del eventos
             gc.collect()
             meio = ini + (fim - ini) / 2
-            t1, c1, i1 = contar_regra(rid, tipo, chave_ultimo, ini, meio)
-            t2, c2, i2 = contar_regra(rid, tipo, chave_ultimo, meio, fim)
+            t1, c1, i1 = contar_regra(rid, tipo, ini, meio)
+            t2, c2, i2 = contar_regra(rid, tipo, meio, fim)
             return t1 + t2, c1 + c2, i1 + i2
 
         if n >= LIMIT:
@@ -908,14 +1132,14 @@ def extrair_comportamento(credentials):
                 f"  ⚠ Janela mínima {ini:%Y-%m-%d %H:%M}–{fim:%H:%M} ainda saturada "
                 f"({n} eventos, regra {rid}) — caso extremo, reduza MIN_JANELA"
             )
-        c, i = processar_eventos(eventos, tipo, chave_ultimo)
+        c, i = processar(eventos, tipo)
         del eventos
         return n, c, i
 
-    # Velocidade (todas as regras) — fracionamento adaptativo sobre os 30 dias.
+    # Velocidade (todas as regras) — fracionamento adaptativo sobre a janela.
     total_vel, contados_vel, ignorados_vel = 0, 0, 0
     for rid in ids_velocidade:
-        t, c, i = contar_regra(rid, "excesso_velocidade", "ultimo_excesso", data_inicio, data_fim)
+        t, c, i = contar_regra(rid, "excesso_velocidade", desde, data_fim)
         total_vel += t
         contados_vel += c
         ignorados_vel += i
@@ -927,47 +1151,52 @@ def extrair_comportamento(credentials):
         if not rid:
             log.warning(f"  • Regra '{tipo}' não encontrada — pulando")
             continue
-        t, c, i = contar_regra(rid, tipo, CAMPO_ULTIMO[tipo], data_inicio, data_fim)
+        t, c, i = contar_regra(rid, tipo, desde, data_fim)
         gc.collect()
         log.info(f"  • {tipo}: {t} eventos ({c} atribuídos, {i} sem match)")
 
-    rows = []
-    for did in lista_ids:
-        c  = contadores[did]
-        ev = c["excesso_velocidade"]
-        ac = c["aceleracao_brusca"]
-        fr = c["frenagem_brusca"]
-        cu = c["curva_drastica"]
-        rows.append({
-            "id":                      did,
-            "serial":                  serial_map.get(did, ""),
-            "placa":                   placa_map.get(did, ""),
-            "todos_grupos":            grupos_map.get(did, ""),
-            "excessos_velocidade_30d": ev,
-            "aceleracoes_bruscas_30d": ac,
-            "frenagens_bruscas_30d":   fr,
-            "curvas_drasticas_30d":    cu,
-            "ultimo_excesso_vel":      ts_brt(c["ultimo_excesso"]),
-            "ultima_acel_brusca":      ts_brt(c["ultima_aceleracao"]),
-            "ultima_fren_brusca":      ts_brt(c["ultima_frenagem"]),
-            "ultima_curva_drastica":   ts_brt(c["ultima_curva"]),
-            "score_risco":             ev * 3 + ac * 2 + fr * 2 + cu * 1,
-            "odometro":                odo_fisico_map.get(did, 0),
-            "odometro_gps":            odo_gps_map.get(did, 0),
-            "atualizado_em":           agora_brt(),
-        })
+    # ── Persiste buckets e mantém a janela móvel ──
+    _upsert_buckets(engine, buckets)
+    del buckets
+    gc.collect()
+    _limpar_buckets_antigos(engine, janela_ini_str)
 
-    df = pd.DataFrame(rows)
-    log.info(f"  → {len(df)} veículos no comportamento")
-    return df
+    # ── Odômetro: backfill usa 6 meses + fallback; incremental usa janela curta ──
+    if backfill:
+        odo_gps_map    = buscar_odo_gps(credentials, lista_ids, janela_ini, data_fim)
+        odo_fisico_map = buscar_odo_fisico(credentials, lista_ids, janela_ini, data_fim)
+    else:
+        recente = data_fim - timedelta(days=ODO_INCREMENTAL_DIAS)
+        odo_gps_map    = buscar_odo_gps(credentials, lista_ids, recente, data_fim, usar_fallback=False)
+        odo_fisico_map = buscar_odo_fisico(credentials, lista_ids, recente, data_fim, usar_fallback=False)
+        # Odômetro é monotônico → mantém o maior entre a leitura nova e a anterior
+        # (quem não reportou na janela curta preserva o valor já gravado).
+        prev = _ler_odo_anterior(engine)
+        odo_gps_map    = {did: max(odo_gps_map.get(did, 0),    prev.get(did, (0, 0))[1]) for did in lista_ids}
+        odo_fisico_map = {did: max(odo_fisico_map.get(did, 0), prev.get(did, (0, 0))[0]) for did in lista_ids}
+
+    # ── Reconstrói tb_comportamento a partir dos buckets dos últimos 6 meses ──
+    base_rows = [
+        {
+            "device_id":    did,
+            "serial":       serial_map.get(did, ""),
+            "placa":        placa_map.get(did, ""),
+            "todos_grupos": grupos_map.get(did, ""),
+            "odometro":     odo_fisico_map.get(did, 0),
+            "odometro_gps": odo_gps_map.get(did, 0),
+        }
+        for did in lista_ids
+    ]
+    _reconstruir_comportamento(engine, base_rows, janela_ini_str, data_fim)
+    log.info(f"  → comportamento sincronizado ({'backfill' if backfill else 'incremental'}).")
 
 
 # ─────────────────────────────────────────────────────────
 # TABELA 4 — VIAGENS  (base do Relatório de Viagem estilo SANEAGO)
 # ─────────────────────────────────────────────────────────
-# Janela de extração. Padrão = MÊS CORRENTE (do dia 1 às 00:00 até agora).
+# Janela de extração. Padrão = ANO CORRENTE (de 1º/jan às 00:00 até agora).
 # VIAGENS_DIAS > 0 sobrescreve com uma janela móvel de N dias (útil p/ smoke test:
-# ex. VIAGENS_DIAS=2). VIAGENS_DIAS=0 (padrão) → mês corrente.
+# ex. VIAGENS_DIAS=2). VIAGENS_DIAS=0 (padrão) → ano corrente.
 VIAGENS_DIAS = int(os.environ.get("VIAGENS_DIAS", 0))
 
 # Reverse geocode (GetAddresses) dobra o volume de chamadas e é o trecho mais
@@ -1169,7 +1398,7 @@ def sincronizar_viagens(credentials, engine):
 
     A continuidade do hodômetro é preservada porque cada device é processado por
     inteiro dentro de um único lote (odo_anterior encadeia as viagens do device)."""
-    periodo = f"{VIAGENS_DIAS} dias" if VIAGENS_DIAS > 0 else "mês corrente"
+    periodo = f"{VIAGENS_DIAS} dias" if VIAGENS_DIAS > 0 else "ano corrente"
     log.info(
         f"Extraindo viagens ({periodo}, geocode={'on' if VIAGENS_GEOCODE else 'off'}, "
         f"lote={VIAGENS_DEVICE_LOTE} devices)..."
@@ -1203,8 +1432,8 @@ def sincronizar_viagens(credentials, engine):
     if VIAGENS_DIAS > 0:
         data_inicio = data_fim - timedelta(days=VIAGENS_DIAS)
     else:
-        # Mês corrente: do dia 1 às 00:00 até agora.
-        data_inicio = data_fim.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        # Ano corrente: de 1º de janeiro às 00:00 até agora.
+        data_inicio = data_fim.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
     log.info(f"  • Janela: {data_inicio:%Y-%m-%d %H:%M} → {data_fim:%Y-%m-%d %H:%M}")
 
     total_lotes    = (len(lista_ids) + VIAGENS_DEVICE_LOTE - 1) // VIAGENS_DEVICE_LOTE
@@ -1332,9 +1561,7 @@ def main(modo=None):
             gc.collect()
 
         if modo in ("all", "comportamento"):
-            df = extrair_comportamento(credentials)
-            gravar_tabela(df, "tb_comportamento", engine, chave_upsert="id")
-            del df
+            sincronizar_comportamento(credentials, engine)
             gc.collect()
 
         # IMPORTANTE: viagens NÃO entra no 'all' — só roda no modo explícito.
