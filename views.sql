@@ -9,9 +9,13 @@
 --   vw_relatorio_viagens         últimos 30 dias (por viagem) (data_partida, data_chegada, atualizado_em)
 --   vw_resumo_frota              últimos 30 dias (janela móvel) (data_ini, data_fim)
 --   vw_indicadores_produtividade últimos 30 dias (janela móvel) (data_ini, data_fim)
--- NOTA: janela mudou de "ano corrente" p/ 30 dias porque o free tier do Supabase
--- (500 MB) não comporta o ano inteiro de viagens. Mantém os indicadores coerentes
--- com os dados retidos (tb_viagens = VIAGENS_DIAS=30). Para ano-corrente, precisa Pro.
+-- Views MENSAIS (filtráveis por ano/mes no BI; cobrem o ano sem guardar viagens cruas):
+--   vw_comportamento_mensal      por mês, ~6 meses (dos buckets) (ano, mes, ano_mes)
+--   vw_resumo_frota_mensal       por veículo×mês, ano 2026       (ano, mes, ano_mes)
+--   vw_indicadores_mensal        por grupo×mês, ano 2026         (ano, mes, ano_mes)
+-- NOTA: o DETALHE (vw_relatorio_viagens) é 30 dias porque o ano inteiro de viagens
+-- cruas não cabe no free tier (500 MB). Os indicadores cobrem o ano via AGREGADO
+-- mensal (tb_resumo_mensal, ~21k linhas/ano) — por isso filtram por mês sem o detalhe.
 
 -- ============================================================
 -- vw_cadastro
@@ -171,4 +175,71 @@ WITH (security_invoker = on) AS
    FROM por_veiculo
   GROUP BY uo_lotacao, todos_grupos
   ORDER BY todos_grupos;
+
+-- ============================================================
+-- vw_comportamento_mensal  (eventos por mês, dos buckets; filtra por ano/mes)
+-- ============================================================
+CREATE OR REPLACE VIEW vw_comportamento_mensal
+WITH (security_invoker = on) AS
+ SELECT e.device_id AS id,
+    c.serial, c.placa, c.todos_grupos,
+    EXTRACT(year  FROM date_trunc('month', e.dia))::int AS ano,
+    EXTRACT(month FROM date_trunc('month', e.dia))::int AS mes,
+    to_char(date_trunc('month', e.dia), 'YYYY-MM') AS ano_mes,
+    COALESCE(sum(e.qtd) FILTER (WHERE e.tipo='excesso_velocidade'),0) AS excessos_velocidade,
+    COALESCE(sum(e.qtd) FILTER (WHERE e.tipo='aceleracao_brusca'),0)  AS aceleracoes_bruscas,
+    COALESCE(sum(e.qtd) FILTER (WHERE e.tipo='frenagem_brusca'),0)    AS frenagens_bruscas,
+    COALESCE(sum(e.qtd) FILTER (WHERE e.tipo='curva_drastica'),0)     AS curvas_drasticas,
+    COALESCE(sum(e.qtd) FILTER (WHERE e.tipo='excesso_velocidade'),0)*3
+      + COALESCE(sum(e.qtd) FILTER (WHERE e.tipo='aceleracao_brusca'),0)*2
+      + COALESCE(sum(e.qtd) FILTER (WHERE e.tipo='frenagem_brusca'),0)*2
+      + COALESCE(sum(e.qtd) FILTER (WHERE e.tipo='curva_drastica'),0)*1 AS score_risco
+   FROM tb_comportamento_eventos e
+     JOIN vw_cadastro c ON c.id = e.device_id
+  GROUP BY e.device_id, c.serial, c.placa, c.todos_grupos, date_trunc('month', e.dia);
+
+-- ============================================================
+-- vw_resumo_frota_mensal  (por veículo × mês, ano 2026; filtra por ano/mes)
+-- Fonte: tb_resumo_mensal (agregado). dias_no_periodo = dias do mês até hoje.
+-- ============================================================
+CREATE OR REPLACE VIEW vw_resumo_frota_mensal
+WITH (security_invoker = on) AS
+ WITH base AS (
+   SELECT r.device_id, r.ano, r.mes, r.km, r.duracao_segundos, r.dias_utilizados, r.viagens,
+          c.placa, c.grupo AS uo_lotacao, c.todos_grupos,
+          (LEAST((date_trunc('month', make_date(r.ano, r.mes, 1)) + interval '1 month' - interval '1 day')::date, CURRENT_DATE)
+            - date_trunc('month', make_date(r.ano, r.mes, 1))::date + 1) AS dias_no_periodo
+     FROM tb_resumo_mensal r JOIN vw_cadastro c ON c.id = r.device_id)
+ SELECT placa, uo_lotacao, todos_grupos, ano, mes,
+        to_char(make_date(ano, mes, 1), 'YYYY-MM') AS ano_mes,
+        dias_no_periodo, dias_utilizados,
+        round(km::numeric, 1) AS km_rodado,
+        round((km / NULLIF(dias_utilizados,0))::numeric, 1) AS media_km_dia,
+        round((duracao_segundos/3600.0)::numeric, 1) AS tempo_movimento_h,
+        round(dias_utilizados::numeric / NULLIF(dias_no_periodo,0) * 100, 0) AS taxa_utilizacao_pct,
+        viagens
+   FROM base
+  ORDER BY placa, ano, mes;
+
+-- ============================================================
+-- vw_indicadores_mensal  (por grupo × mês, ano 2026; filtra por ano/mes)
+-- ============================================================
+CREATE OR REPLACE VIEW vw_indicadores_mensal
+WITH (security_invoker = on) AS
+ WITH base AS (
+   SELECT r.device_id, r.ano, r.mes, r.km, r.duracao_segundos, r.dias_utilizados,
+          c.grupo AS uo_lotacao, c.todos_grupos,
+          (LEAST((date_trunc('month', make_date(r.ano, r.mes, 1)) + interval '1 month' - interval '1 day')::date, CURRENT_DATE)
+            - date_trunc('month', make_date(r.ano, r.mes, 1))::date + 1) AS dias_no_periodo
+     FROM tb_resumo_mensal r JOIN vw_cadastro c ON c.id = r.device_id)
+ SELECT uo_lotacao, todos_grupos, ano, mes,
+        to_char(make_date(ano, mes, 1), 'YYYY-MM') AS ano_mes,
+        count(*) AS qtd_veiculos,
+        round(sum(km)::numeric, 0) AS km_total,
+        round((sum(km) / NULLIF(count(*),0))::numeric, 0) AS media_km_veiculo,
+        round((sum(duracao_segundos)/3600.0)::numeric, 0) AS tempo_movimento_h,
+        round(avg(dias_utilizados::numeric / NULLIF(dias_no_periodo,0) * 100), 0) AS taxa_media_utilizacao_pct
+   FROM base
+  GROUP BY uo_lotacao, todos_grupos, ano, mes
+  ORDER BY todos_grupos, ano, mes;
 

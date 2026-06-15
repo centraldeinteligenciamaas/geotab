@@ -233,6 +233,22 @@ def criar_tabelas(engine):
             endereco  TEXT,
             PRIMARY KEY (lat, lon)
         );
+
+        -- Agregado MENSAL de viagens por veículo (km/tempo/dias/qtd). Permite
+        -- indicadores cobrindo o ano inteiro filtráveis por mês no BI, sem guardar
+        -- as viagens cruas do ano (que não cabem no free tier). ~1750 devices × 12
+        -- meses ≈ 21k linhas/ano. placa/grupo vêm de tb_cadastro via JOIN nas views.
+        CREATE TABLE IF NOT EXISTS tb_resumo_mensal (
+            device_id         TEXT,
+            ano               INTEGER,
+            mes               INTEGER,
+            km                DOUBLE PRECISION,
+            duracao_segundos  BIGINT,
+            dias_utilizados   INTEGER,
+            viagens           INTEGER,
+            atualizado_em     TIMESTAMP,
+            PRIMARY KEY (device_id, ano, mes)
+        );
     """
     # Migra colunas existentes de TIMESTAMPTZ → TIMESTAMP (converte UTC → BRT)
     migrar = """
@@ -1654,8 +1670,125 @@ def sincronizar_viagens(credentials, engine):
     if VIAGENS_GEOCODE:
         geocodificar_enderecos(credentials, engine)
 
+    # Atualiza o MÊS CORRENTE do agregado mensal a partir de tb_viagens (sem nova
+    # chamada Geotab). Meses passados ficam congelados (preenchidos uma vez por
+    # backfill_resumo_mensal). É o que mantém vw_indicadores_mensal vivo no dia a dia.
+    atualizar_resumo_mes_corrente(engine)
+
     log.info(f"  → {total_gravadas} viagens gravadas em tb_viagens")
     return total_gravadas
+
+
+def _upsert_resumo_mensal(engine, agg):
+    """Grava/atualiza tb_resumo_mensal a partir de agg
+    {(device_id, ano, mes): {'km', 'dur', 'dias'(set), 'viagens'}}."""
+    if not agg:
+        log.info("  • Resumo mensal: nada a agregar.")
+        return
+    df = pd.DataFrame([
+        {"device_id": did, "ano": ano, "mes": mes,
+         "km": round(b["km"], 2), "duracao_segundos": int(b["dur"]),
+         "dias_utilizados": len(b["dias"]), "viagens": b["viagens"],
+         "atualizado_em": agora_brt()}
+        for (did, ano, mes), b in agg.items()
+    ])
+
+    def _exec():
+        with engine.begin() as conn:
+            df.to_sql("tmp_resumo_mensal", conn, if_exists="replace", index=False, chunksize=5000)
+            conn.execute(text("""
+                INSERT INTO tb_resumo_mensal
+                    (device_id, ano, mes, km, duracao_segundos, dias_utilizados, viagens, atualizado_em)
+                SELECT device_id, ano, mes, km, duracao_segundos, dias_utilizados, viagens, atualizado_em
+                FROM tmp_resumo_mensal
+                ON CONFLICT (device_id, ano, mes) DO UPDATE SET
+                    km=EXCLUDED.km, duracao_segundos=EXCLUDED.duracao_segundos,
+                    dias_utilizados=EXCLUDED.dias_utilizados, viagens=EXCLUDED.viagens,
+                    atualizado_em=EXCLUDED.atualizado_em
+            """))
+            conn.execute(text("DROP TABLE IF EXISTS tmp_resumo_mensal"))
+
+    _com_retry(_exec)
+    log.info(f"  ✓ resumo mensal: {len(df)} linhas (device×mês) gravadas.")
+
+
+def backfill_resumo_mensal(credentials, engine, data_inicio, data_fim):
+    """Agrega as Trips de [data_inicio, data_fim] por (device, ano, mês) e faz
+    upsert em tb_resumo_mensal — SEM guardar viagens cruas. Usado p/ o backfill do
+    ano (uma vez). Pesado na Geotab (busca Trips de todos os devices na janela),
+    então rode isolado de outros jobs p/ não dividir a quota."""
+    log.info(f"Backfill resumo mensal: {data_inicio:%Y-%m-%d} → {data_fim:%Y-%m-%d}")
+    veiculos  = geotab_get(credentials, "Device")
+    lista_ids = [v.get("id") for v in veiculos]
+    del veiculos
+
+    agg = {}
+    LOTE = VIAGENS_DEVICE_LOTE
+    total_lotes = (len(lista_ids) + LOTE - 1) // LOTE
+    for n, ini in enumerate(range(0, len(lista_ids), LOTE), start=1):
+        chunk = lista_ids[ini:ini + LOTE]
+        resultados = multicall(credentials, [
+            {"method": "Get", "params": {"typeName": "Trip", "search": {
+                "deviceSearch": {"id": did},
+                "fromDate": data_inicio.strftime(FMT),
+                "toDate":   data_fim.strftime(FMT)}}}
+            for did in chunk
+        ])
+        for j, resultado in enumerate(resultados):
+            did = chunk[j]
+            raw = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
+            for v in raw:
+                if not isinstance(v, dict) or not v.get("start"):
+                    continue
+                ts = ts_brt(v.get("start"))
+                if pd.isna(ts):
+                    continue
+                k = (did, ts.year, ts.month)
+                b = agg.get(k)
+                if b is None:
+                    b = agg[k] = {"km": 0.0, "dur": 0, "dias": set(), "viagens": 0}
+                b["km"]      += float(v.get("distance") or 0)
+                b["dur"]     += _duracao_para_segundos(v.get("drivingDuration"))
+                b["dias"].add(ts.date())
+                b["viagens"] += 1
+        del resultados
+        if n % 10 == 0 or n == total_lotes:
+            log.info(f"  • backfill mensal: lote {n}/{total_lotes} ({len(agg)} device×mês até agora)")
+        gc.collect()
+
+    _upsert_resumo_mensal(engine, agg)
+    log.info(f"  → backfill resumo mensal concluído ({len(agg)} device×mês).")
+
+
+def atualizar_resumo_mes_corrente(engine):
+    """Recalcula SÓ o mês corrente de tb_resumo_mensal a partir de tb_viagens (já
+    no banco — sem nova chamada Geotab). Mantém o mês vigente fresco a cada sync;
+    meses anteriores ficam congelados (vieram do backfill)."""
+    def _exec():
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO tb_resumo_mensal
+                    (device_id, ano, mes, km, duracao_segundos, dias_utilizados, viagens, atualizado_em)
+                SELECT device_id,
+                       EXTRACT(year  FROM data_partida)::int,
+                       EXTRACT(month FROM data_partida)::int,
+                       round(sum(distancia_km)::numeric, 2)::float8,
+                       sum(duracao_segundos)::bigint,
+                       count(DISTINCT data_partida::date),
+                       count(*),
+                       :agora
+                  FROM tb_viagens
+                 WHERE data_partida >= date_trunc('month', CURRENT_DATE)
+                 GROUP BY device_id,
+                       EXTRACT(year FROM data_partida),
+                       EXTRACT(month FROM data_partida)
+                ON CONFLICT (device_id, ano, mes) DO UPDATE SET
+                    km=EXCLUDED.km, duracao_segundos=EXCLUDED.duracao_segundos,
+                    dias_utilizados=EXCLUDED.dias_utilizados, viagens=EXCLUDED.viagens,
+                    atualizado_em=EXCLUDED.atualizado_em
+            """), {"agora": agora_brt()})
+    _com_retry(_exec)
+    log.info("  ✓ resumo mensal: mês corrente atualizado de tb_viagens.")
 
 
 # ─────────────────────────────────────────────────────────

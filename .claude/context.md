@@ -35,6 +35,8 @@
 - `vw_relatorio_viagens` — ano corrente, por viagem (`data_partida`, `data_chegada`)
 - `vw_resumo_frota` — JANELA MÓVEL 30 dias (`data_ini = CURRENT_DATE - 30 days`)
 - `vw_indicadores_produtividade` — JANELA MÓVEL 30 dias; agrupado por `todos_grupos`
+- MENSAIS (filtram por ano/mes no BI): `vw_comportamento_mensal` (dos buckets, ~6m), `vw_resumo_frota_mensal` e `vw_indicadores_mensal` (de `tb_resumo_mensal`, ano 2026). Detalhe (vw_relatorio_viagens) segue 30d; indicadores cobrem o ano via agregado mensal.
+- `tb_resumo_mensal` — agregado km/tempo/dias/viagens por device×mês (~21k linhas/ano). Mês corrente: atualizado no sync de viagens via `atualizar_resumo_mes_corrente` (SQL de tb_viagens, sem Geotab). Meses passados: `backfill_resumo_mensal` (Geotab, uma vez). placa/grupo via JOIN tb_cadastro nas views.
 - NOTA: as views VIVAS já estavam em 30 dias; o `views.sql` estava DESATUALIZADO (dizia "ano corrente"). Arquivo sincronizado com o banco em 2026-06-15. Sempre conferir com `pg_get_viewdef` antes de assumir o que o arquivo diz.
 
 ## Decisões importantes

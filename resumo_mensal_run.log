@@ -1,0 +1,5 @@
+2026-06-15 17:15:32,677  INFO    • Saída das chamadas Geotab: direto
+>>> MES 01: 2026-01-01 -> 2026-01-31
+2026-06-15 17:15:34,450  INFO  Backfill resumo mensal: 2026-01-01 → 2026-01-31
+2026-06-15 17:16:33,761  INFO    • backfill mensal: lote 10/70 (224 device×mês até agora)
+2026-06-15 17:17:37,342  INFO    • backfill mensal: lote 20/70 (441 device×mês até agora)
