@@ -1,0 +1,8 @@
+2026-06-15 13:19:27,544  INFO    • Saída das chamadas Geotab: direto
+2026-06-15 13:19:27,545  INFO  =======================================================
+2026-06-15 13:19:27,545  INFO    Geotab → Supabase  |  modo: viagens
+2026-06-15 13:19:27,545  INFO  =======================================================
+2026-06-15 13:19:28,047  INFO    ✓ Tabelas verificadas no Supabase.
+2026-06-15 13:19:29,577  INFO    ✓ Autenticado no Geotab
+
+2026-06-15 13:19:29,577  INFO  Extraindo viagens (ano corrente, geocode=on, lote=25 devices)...

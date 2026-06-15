@@ -988,7 +988,7 @@ def _limpar_buckets_antigos(engine, limite_dia):
     def _exec():
         with engine.begin() as conn:
             r = conn.execute(
-                text("DELETE FROM tb_comportamento_eventos WHERE dia < :lim::date"),
+                text("DELETE FROM tb_comportamento_eventos WHERE dia < CAST(:lim AS date)"),
                 {"lim": limite_dia},
             )
             return r.rowcount
@@ -1037,19 +1037,19 @@ def _reconstruir_comportamento(engine, base_rows, janela_ini, agora):
                 FROM tmp_comp_base b
                 LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
                            FROM tb_comportamento_eventos
-                           WHERE dia >= :ini::date AND tipo='excesso_velocidade'
+                           WHERE dia >= CAST(:ini AS date) AND tipo='excesso_velocidade'
                            GROUP BY device_id) ev ON ev.device_id = b.device_id
                 LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
                            FROM tb_comportamento_eventos
-                           WHERE dia >= :ini::date AND tipo='aceleracao_brusca'
+                           WHERE dia >= CAST(:ini AS date) AND tipo='aceleracao_brusca'
                            GROUP BY device_id) ac ON ac.device_id = b.device_id
                 LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
                            FROM tb_comportamento_eventos
-                           WHERE dia >= :ini::date AND tipo='frenagem_brusca'
+                           WHERE dia >= CAST(:ini AS date) AND tipo='frenagem_brusca'
                            GROUP BY device_id) fr ON fr.device_id = b.device_id
                 LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
                            FROM tb_comportamento_eventos
-                           WHERE dia >= :ini::date AND tipo='curva_drastica'
+                           WHERE dia >= CAST(:ini AS date) AND tipo='curva_drastica'
                            GROUP BY device_id) cu ON cu.device_id = b.device_id
                 ON CONFLICT (id) DO UPDATE SET
                     serial=EXCLUDED.serial, placa=EXCLUDED.placa,
