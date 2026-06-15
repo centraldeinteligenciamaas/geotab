@@ -24,15 +24,18 @@
 - `tb_status` — snapshot tempo real (`snapshot_em`); motorista vem das trips das últimas 24h
 - `tb_comportamento` — janela móvel de 6 meses (contadores `*_6m`); incremental via buckets
 - `tb_comportamento_eventos` — buckets diários device/dia/tipo; mantém só os últimos 6 meses (limpeza automática)
-- `tb_viagens` — ano corrente por padrão (`VIAGENS_DIAS=0`); `VIAGENS_DIAS>0` = janela móvel de N dias (smoke test)
+- `tb_viagens` — JANELA MÓVEL DE 30 DIAS (`VIAGENS_DIAS=30`, fixado no free tier). `sincronizar_viagens` PODA (`DELETE data_partida < data_inicio`) quando `VIAGENS_DIAS>0` — sem isso o upsert nunca apaga e reenche o disco.
+- GEOCODE por LOOKUP (2026-06-15): endereços ficam em `tb_enderecos` (coord arredondada→endereço), NÃO em tb_viagens. `vw_relatorio_viagens` traz `end_partida`/`end_chegada` por JOIN em `round(lat/lon, 3)`. `geocodificar_enderecos()` (chamada no fim de sincronizar_viagens se VIAGENS_GEOCODE on) é incremental: só geocodifica coords novas. `GEOCODE_CASAS=3` (~110m) dedup ~1,4M→83k coords (geocode trip-a-trip era inviável, dias). IMPORTANTE: o `round(...,3)` da view tem que casar com GEOCODE_CASAS.
+- tb_viagens ENXUTA (2026-06-15): removidas serial/placa/veiculo/grupo/todos_grupos/regional/superintendencia (~190 MB de texto repetido). placa/veiculo/grupo/todos_grupos agora vêm de tb_cadastro via JOIN (por device_id) nas views *_viagens; regional/superintendencia eram peso morto (nenhuma view usava). Resultado: banco 484→259 MB, tb_viagens 429→204 MB, ~241 MB de folga. 0 viagens órfãs (todo device casa com tb_cadastro). 709.767 viagens / 30 dias.
 
 ## Views e períodos (header de views.sql)
 - `vw_cadastro` — snapshot atual (`atualizado_em`)
 - `vw_status` — tempo real (`snapshot_em`, `ultimo_contato`)
 - `vw_comportamento` — últimos 6 meses (`periodo_ini`, `periodo_fim` = atualizado_em − 6m)
 - `vw_relatorio_viagens` — ano corrente, por viagem (`data_partida`, `data_chegada`)
-- `vw_resumo_frota` — ano corrente (`data_ini` = 1º jan, `data_fim` = hoje)
-- `vw_indicadores_produtividade` — ano corrente; agrupado por `todos_grupos`
+- `vw_resumo_frota` — JANELA MÓVEL 30 dias (`data_ini = CURRENT_DATE - 30 days`)
+- `vw_indicadores_produtividade` — JANELA MÓVEL 30 dias; agrupado por `todos_grupos`
+- NOTA: as views VIVAS já estavam em 30 dias; o `views.sql` estava DESATUALIZADO (dizia "ano corrente"). Arquivo sincronizado com o banco em 2026-06-15. Sempre conferir com `pg_get_viewdef` antes de assumir o que o arquivo diz.
 
 ## Decisões importantes
 - TIMESTAMP sem timezone, valores em BRT (Brasil sem horário de verão desde 2019)
@@ -61,6 +64,11 @@
 - Projeto Supabase do geotab (ref dyqrxszogdcsjnhodmrv) está em OUTRA conta — integração MCP só vê "automultas"
 - `check_lints.py` (raiz) — script de diagnóstico de conexão/lints; rodar com PYTHONIOENCODING=utf-8 (console cp1252 quebra com "→")
 - Lints corrigidos com: ALTER VIEW ... SET (security_invoker = on) + ALTER TABLE ... ENABLE ROW LEVEL SECURITY (sem policies — consumo é só conexão direta como owner)
+
+## LIMITE DE DISCO ESTOURADO (2026-06-15) — banco em READ-ONLY
+- Supabase free tier = 500 MB. Carga de viagens do ANO inteiro (geocode off) levou o banco a 890 MB e o Supabase forçou `default_transaction_read_only=on` (bloqueia INSERT/DELETE/TRUNCATE/DROP).
+- Culpado: `tb_viagens` = 1.295.267 linhas / 834 MB (carga parou no lote 26/70; ano completo seria ~3,4M). As outras tabelas são pequenas (~1 MB cada; eventos = 42 MB) e foram atualizadas OK ANTES de encher.
+- tb_viagens ano-corrente é INCOMPATÍVEL com o free tier. Caminhos: (a) no painel Supabase desativar read-only temporariamente → trim/TRUNCATE tb_viagens → usar VIAGENS_DIAS curto (ex.: 30-90d) p/ nunca reencher; (b) upgrade Pro (8 GB) se precisa do ano todo. Decisão pendente do usuário (custo x retenção) + ação no painel (só o dono faz).
 
 ## Bug corrigido (2026-06-15)
 - `_limpar_buckets_antigos` e `_reconstruir_comportamento` usavam bind colado no cast PG (`:lim::date`, `:ini::date`). SQLAlchemy 2.0/psycopg2 não substitui o bind nesse formato → "syntax error at or near :". Corrigido p/ `CAST(:param AS date)`. (A contagem + upsert de buckets já tinha rodado; o erro era só na limpeza/reconstrução.)

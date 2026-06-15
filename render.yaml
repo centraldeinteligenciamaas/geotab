@@ -30,3 +30,8 @@ services:
       # Ex.: http://user:senha@host:porta. Vazio = conexão direta (uso local).
       - key: GEOTAB_PROXY
         sync: false
+      # Janela de viagens. O ano inteiro estoura o free tier do Supabase (500 MB):
+      # esta frota faz ~22k viagens/dia → ano todo = ~3,4M linhas / >2 GB. 30 dias
+      # (~660k linhas / ~425 MB) é o máximo que cabe. Para o ano todo, precisa Pro.
+      - key: VIAGENS_DIAS
+        value: "30"

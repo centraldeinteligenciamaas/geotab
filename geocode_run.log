@@ -1,0 +1,16 @@
+2026-06-15 16:10:44,330  INFO    • Saída das chamadas Geotab: direto
+2026-06-15 16:10:50,840  INFO    • Geocode: 83,014 coordenadas distintas pendentes (arredondadas a 3 casas decimais).
+2026-06-15 16:10:50,843  INFO      → geocode lote 1/50 (100 coords)
+2026-06-15 16:10:54,388  INFO      → geocode lote 2/50 (100 coords)
+2026-06-15 16:10:58,138  INFO      → geocode lote 3/50 (100 coords)
+2026-06-15 16:11:01,956  INFO      → geocode lote 4/50 (100 coords)
+2026-06-15 16:11:05,090  INFO      → geocode lote 5/50 (100 coords)
+2026-06-15 16:11:08,200  INFO      → geocode lote 6/50 (100 coords)
+2026-06-15 16:11:12,027  INFO      → geocode lote 7/50 (100 coords)
+2026-06-15 16:11:15,195  INFO      → geocode lote 8/50 (100 coords)
+2026-06-15 16:11:18,922  INFO      → geocode lote 9/50 (100 coords)
+2026-06-15 16:11:22,050  INFO      → geocode lote 10/50 (100 coords)
+2026-06-15 16:11:25,187  INFO      → geocode lote 11/50 (100 coords)
+2026-06-15 16:11:29,255  INFO      → geocode lote 12/50 (100 coords)
+2026-06-15 16:11:32,065  INFO      → geocode lote 13/50 (100 coords)
+2026-06-15 16:11:35,213  INFO      → geocode lote 14/50 (100 coords)

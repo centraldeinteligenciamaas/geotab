@@ -181,16 +181,12 @@ def criar_tabelas(engine):
             atualizado_em            TIMESTAMP
         );
 
+        -- Enxuta de propósito: placa/veiculo/grupo/todos_grupos NÃO ficam aqui —
+        -- são derivados de tb_cadastro (por device_id) nas views. Repetir esse texto
+        -- por viagem custava ~190 MB e estourava o free tier do Supabase (500 MB).
         CREATE TABLE IF NOT EXISTS tb_viagens (
             id                  TEXT PRIMARY KEY,   -- device_id + '|' + start
             device_id           TEXT,
-            serial              TEXT,
-            placa               TEXT,
-            veiculo             TEXT,
-            grupo               TEXT,
-            regional            TEXT,
-            superintendencia    TEXT,
-            todos_grupos        TEXT,
             data_partida        TIMESTAMP,
             data_chegada        TIMESTAMP,
             duracao_segundos    INTEGER,
@@ -226,6 +222,17 @@ def criar_tabelas(engine):
             PRIMARY KEY (device_id, dia, tipo)
         );
         CREATE INDEX IF NOT EXISTS ix_comp_eventos_dia ON tb_comportamento_eventos (dia);
+
+        -- Cache de geocodificação (coord arredondada → endereço). As views de
+        -- viagens trazem o endereço por JOIN, evitando guardar texto de endereço
+        -- repetido em cada viagem (que reinflaria tb_viagens). Coords arredondadas
+        -- a GEOCODE_CASAS decimais para deduplicar paradas próximas.
+        CREATE TABLE IF NOT EXISTS tb_enderecos (
+            lat       NUMERIC(8,4),
+            lon       NUMERIC(9,4),
+            endereco  TEXT,
+            PRIMARY KEY (lat, lon)
+        );
     """
     # Migra colunas existentes de TIMESTAMPTZ → TIMESTAMP (converte UTC → BRT)
     migrar = """
@@ -273,9 +280,18 @@ def criar_tabelas(engine):
             ADD COLUMN IF NOT EXISTS todos_grupos        TEXT;
         ALTER TABLE tb_comportamento
             ADD COLUMN IF NOT EXISTS todos_grupos TEXT;
+        -- Enxugamento (2026-06-15): colunas derivadas de tb_cadastro ou não usadas
+        -- por nenhuma view saem de tb_viagens p/ caber no free tier. As views passam
+        -- a trazer placa/veiculo/grupo/todos_grupos via JOIN com tb_cadastro. Rode
+        -- VACUUM FULL tb_viagens depois p/ reaver o espaço em disco.
         ALTER TABLE tb_viagens
-            ADD COLUMN IF NOT EXISTS regional         TEXT,
-            ADD COLUMN IF NOT EXISTS superintendencia TEXT;
+            DROP COLUMN IF EXISTS serial,
+            DROP COLUMN IF EXISTS placa,
+            DROP COLUMN IF EXISTS veiculo,
+            DROP COLUMN IF EXISTS grupo,
+            DROP COLUMN IF EXISTS todos_grupos,
+            DROP COLUMN IF EXISTS regional,
+            DROP COLUMN IF EXISTS superintendencia;
         -- Renomeia os contadores _30d → _6m (janela passou de 30 dias p/ 6 meses).
         DO $$ BEGIN
             IF EXISTS (SELECT 1 FROM information_schema.columns
@@ -1368,7 +1384,78 @@ def reverse_geocode(credentials, coordenadas):
     return enderecos
 
 
-def _montar_viagem_row(v, did, maps, info_motoristas, odo_anterior, coord_anterior):
+# Casas decimais p/ deduplicar coordenadas no cache de endereços. 3 ≈ 110 m
+# (paradas próximas viram um ponto), o que torna o geocode viável: ~83k coords
+# distintas em vez de ~1,4M trip-a-trip. Aumente p/ 4 (~11 m) se precisar de mais
+# precisão (mais chamadas/tempo). O JOIN nas views usa a MESMA arredondamento.
+GEOCODE_CASAS = int(os.environ.get("GEOCODE_CASAS", 3))
+
+
+def geocodificar_enderecos(credentials, engine, casas=None, bloco=5000):
+    """Backfill INCREMENTAL do cache tb_enderecos (coord arredondada → endereço).
+
+    Geocodifica só as coordenadas distintas (partida+chegada de tb_viagens,
+    arredondadas a `casas` decimais) que ainda NÃO estão em tb_enderecos. As views
+    de viagens trazem o endereço por JOIN nessa tabela, então o texto não infla
+    tb_viagens. Idempotente/resumível: cada execução cobre apenas o que falta;
+    persiste em blocos para não perder progresso se cair no meio."""
+    casas = GEOCODE_CASAS if casas is None else casas
+
+    def _pendentes():
+        with engine.connect() as conn:
+            return conn.execute(text(f"""
+                WITH coords AS (
+                    SELECT round(lat_partida::numeric, {casas}) la,
+                           round(lon_partida::numeric, {casas}) lo
+                      FROM tb_viagens WHERE lat_partida <> 0 AND lon_partida <> 0
+                    UNION
+                    SELECT round(lat_chegada::numeric, {casas}),
+                           round(lon_chegada::numeric, {casas})
+                      FROM tb_viagens WHERE lat_chegada <> 0 AND lon_chegada <> 0
+                )
+                SELECT c.la, c.lo
+                  FROM coords c
+                  LEFT JOIN tb_enderecos e ON e.lat = c.la AND e.lon = c.lo
+                 WHERE e.lat IS NULL
+            """)).all()
+
+    pendentes = _com_retry(_pendentes)
+    if not pendentes:
+        log.info("  • Geocode: tb_enderecos já em dia (nada pendente).")
+        return
+    log.info(f"  • Geocode: {len(pendentes):,} coordenadas distintas pendentes "
+             f"(arredondadas a {casas} casas decimais).")
+
+    total = 0
+    for i in range(0, len(pendentes), bloco):
+        sub    = pendentes[i:i + bloco]
+        # API quer floats; o cache guarda os Decimals arredondados (casam no JOIN).
+        coords = [(float(la), float(lo)) for la, lo in sub]
+        addrs  = reverse_geocode(credentials, coords)
+        df = pd.DataFrame([
+            {"lat": la, "lon": lo, "endereco": a}
+            for (la, lo), a in zip(sub, addrs)
+        ])
+
+        def _grava():
+            with engine.begin() as conn:
+                df.to_sql("tmp_enderecos", conn, if_exists="replace", index=False, chunksize=2000)
+                conn.execute(text("""
+                    INSERT INTO tb_enderecos (lat, lon, endereco)
+                    SELECT lat, lon, endereco FROM tmp_enderecos
+                    ON CONFLICT (lat, lon) DO UPDATE SET endereco = EXCLUDED.endereco
+                """))
+                conn.execute(text("DROP TABLE IF EXISTS tmp_enderecos"))
+
+        _com_retry(_grava)
+        total += len(df)
+        log.info(f"    → {total:,}/{len(pendentes):,} endereços no cache")
+        gc.collect()
+
+    log.info(f"  ✓ Geocode concluído: +{total:,} endereços em tb_enderecos.")
+
+
+def _montar_viagem_row(v, did, info_motoristas, odo_anterior, coord_anterior):
     """Monta a row de UMA viagem e devolve
     (row, lat_p, lon_p, lat_c, lon_c, novo_odo_anterior, novo_coord_anterior).
     Mantém a continuidade do hodômetro via odo_anterior e do ponto de partida via
@@ -1402,16 +1489,12 @@ def _montar_viagem_row(v, did, maps, info_motoristas, odo_anterior, coord_anteri
     lat_c, lon_c = _coord(v.get("stopPoint"))
     lat_p, lon_p = coord_anterior if coord_anterior else (None, None)
 
+    # placa/veiculo/grupo/todos_grupos NÃO são gravados aqui — são derivados de
+    # tb_cadastro (por device_id) nas views, evitando repetir ~190 MB de texto por
+    # todas as viagens (o free tier do Supabase não comporta). Ver views *_viagens.
     row = {
         "id":                  f"{did}|{start}",
         "device_id":           did,
-        "serial":              maps["serial"].get(did, ""),
-        "placa":               maps["placa"].get(did, ""),
-        "veiculo":             maps["nome"].get(did, ""),
-        "grupo":               maps["grupo"].get(did, ""),
-        "regional":            maps["regional"].get(did, ""),
-        "superintendencia":    maps["superintendencia"].get(did, ""),
-        "todos_grupos":        maps["grupos_todos"].get(did, ""),
         "data_partida":        ts_brt(start),
         "data_chegada":        ts_brt(stop),
         "duracao_segundos":    _duracao_para_segundos(v.get("drivingDuration")),
@@ -1452,29 +1535,12 @@ def sincronizar_viagens(credentials, engine):
         f"lote={VIAGENS_DEVICE_LOTE} devices)..."
     )
 
+    # Só precisamos dos IDs dos devices: placa/veículo/grupo/todos_grupos vêm de
+    # tb_cadastro via JOIN nas views, não são mais gravados por viagem. (Antes este
+    # bloco buscava Group e montava maps de texto p/ cada device — desnecessário.)
     veiculos  = geotab_get(credentials, "Device")
     lista_ids = [v.get("id") for v in veiculos]
-
-    grupos = {g.get("id"): g.get("name", "") for g in geotab_get(credentials, "Group")}
-    maps = {
-        "serial":           {v.get("id"): v.get("serialNumber", "") for v in veiculos},
-        "placa":            {v.get("id"): v.get("licensePlate", "") for v in veiculos},
-        "nome":             {v.get("id"): v.get("name", "")          for v in veiculos},
-        "grupo":            {},
-        "grupos_todos":     {},
-        "regional":         {},
-        "superintendencia": {},
-    }
-    for v in veiculos:
-        gnomes = [grupos.get(g.get("id"), g.get("id")) for g in v.get("groups", [])]
-        did = v.get("id")
-        maps["grupo"][did]            = gnomes[-1] if gnomes else ""
-        maps["grupos_todos"][did]     = " | ".join(gnomes)
-        # Hierarquia SANEAGO codificada por prefixo no nome do grupo:
-        # REG_ = regional, SUP_ = superintendência (guarda o nome completo do grupo).
-        maps["regional"][did]         = next((g for g in gnomes if g.startswith("REG_")), "")
-        maps["superintendencia"][did] = next((g for g in gnomes if g.startswith("SUP_")), "")
-    del grupos, veiculos
+    del veiculos
 
     data_fim = agora_brt()
     if VIAGENS_DIAS > 0:
@@ -1542,7 +1608,10 @@ def sincronizar_viagens(credentials, engine):
             credentials, chunk_ids, data_inicio, VIAGENS_SEED_DIAS
         )
 
-        rows, coords_partida, coords_chegada = [], [], []
+        # Coords (lat/lon) já vão dentro de cada row → tb_viagens. O endereço NÃO
+        # é geocodificado por viagem aqui (era o gargalo, dias de execução); é
+        # resolvido depois, deduplicado, em tb_enderecos (ver geocodificar_enderecos).
+        rows = []
         for did in chunk_ids:
             seed = seeds.get(did, {})
             odo_anterior = seed.get("odo")
@@ -1551,28 +1620,37 @@ def sincronizar_viagens(credentials, engine):
                 if not v.get("start"):
                     continue
                 row, lat_p, lon_p, lat_c, lon_c, odo_anterior, coord_anterior = _montar_viagem_row(
-                    v, did, maps, info_motoristas, odo_anterior, coord_anterior
+                    v, did, info_motoristas, odo_anterior, coord_anterior
                 )
                 rows.append(row)
-                coords_partida.append((lat_p, lon_p))
-                coords_chegada.append((lat_c, lon_c))
         del viagens_por_device, info_motoristas, seeds
-
-        if rows and VIAGENS_GEOCODE:
-            log.info(f"    → geocodificando {len(rows)} viagens do lote...")
-            end_partida = reverse_geocode(credentials, coords_partida)
-            end_chegada = reverse_geocode(credentials, coords_chegada)
-            for k, r in enumerate(rows):
-                r["end_partida"] = end_partida[k] if k < len(end_partida) else ""
-                r["end_chegada"] = end_chegada[k] if k < len(end_chegada) else ""
-            del end_partida, end_chegada
-        del coords_partida, coords_chegada
 
         if rows:
             gravar_tabela(pd.DataFrame(rows), "tb_viagens", engine, chave_upsert="id")
             total_gravadas += len(rows)
         del rows
         gc.collect()
+
+    # Janela móvel: o upsert por id NUNCA apaga, então sem esta poda a tabela
+    # cresceria a cada execução (a janela desliza, adiciona um dia novo e mantém
+    # os antigos) e reencheria o free tier do Supabase. Só poda quando há janela
+    # (VIAGENS_DIAS > 0); no modo ano-corrente (=0) mantém tudo da janela.
+    if VIAGENS_DIAS > 0:
+        def _podar():
+            with engine.begin() as conn:
+                r = conn.execute(
+                    text("DELETE FROM tb_viagens WHERE data_partida < :ini"),
+                    {"ini": data_inicio},
+                )
+                return r.rowcount
+        apagadas = _com_retry(_podar)
+        log.info(f"  ✓ {apagadas} viagens fora da janela (< {data_inicio:%Y-%m-%d}) removidas.")
+
+    # Geocode incremental e deduplicado: preenche tb_enderecos com as coordenadas
+    # ainda não conhecidas. O relatório traz o endereço por JOIN, sem inflar
+    # tb_viagens. Controlado por VIAGENS_GEOCODE (off = pula).
+    if VIAGENS_GEOCODE:
+        geocodificar_enderecos(credentials, engine)
 
     log.info(f"  → {total_gravadas} viagens gravadas em tb_viagens")
     return total_gravadas
