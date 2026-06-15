@@ -26,3 +26,7 @@ services:
         sync: false
       - key: SYNC_API_KEY
         sync: false
+      # Proxy de saída p/ contornar o bloqueio de WAF da Geotab no IP do Render.
+      # Ex.: http://user:senha@host:porta. Vazio = conexão direta (uso local).
+      - key: GEOTAB_PROXY
+        sync: false

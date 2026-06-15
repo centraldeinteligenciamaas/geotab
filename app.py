@@ -9,7 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import text
 
-from geotab_supabase import main as sync_main, criar_engine
+from geotab_supabase import main as sync_main, criar_engine, descrever_saida_geotab
 
 app = Flask(__name__)
 BRT = ZoneInfo("America/Sao_Paulo")
@@ -107,6 +107,7 @@ def health():
     return jsonify({
         "status": "ok",
         "hora_brt": datetime.now(tz=BRT).strftime("%Y-%m-%d %H:%M:%S"),
+        "saida_geotab": descrever_saida_geotab(),
     })
 
 
@@ -134,6 +135,7 @@ def status():
         "em_execucao": _estado["em_execucao"],
         "modo_atual":  _estado["modo_atual"],
         "ultimo_erro": _estado["ultimo_erro"],
+        "saida_geotab": descrever_saida_geotab(),
         "ultima_atualizacao_brt": {k: str(v) if v else None for k, v in ult.items()},
         "proximas_execucoes_brt": proximos,
     })

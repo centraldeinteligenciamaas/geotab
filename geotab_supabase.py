@@ -421,6 +421,28 @@ def _eh_erro_quota(resp):
     return "quota" in str(err.get("message", "")).lower()
 
 
+# Proxy de saída OPCIONAL para alternar o IP de origem das chamadas Geotab.
+# A API fica atrás de Cloudflare e barra (403) IPs de datacenter flagados — caso
+# do Render. Defina GEOTAB_PROXY (ex.: "http://user:senha@host:porta") para rotear
+# por um IP confiável; deixe vazio para conexão DIRETA (uso local, IP limpo).
+# Só afeta as chamadas Geotab (requests); a conexão Supabase usa psycopg2 e não
+# passa por aqui. Assim o MESMO código roda local (direto) e no Render (via proxy)
+# só trocando a variável de ambiente.
+GEOTAB_PROXY = os.environ.get("GEOTAB_PROXY", "").strip()
+
+
+def _host_proxy(url: str) -> str:
+    """Host:porta do proxy SEM expor credenciais (descarta user:senha@)."""
+    if not url:
+        return ""
+    return url.split("://", 1)[-1].split("@", 1)[-1]
+
+
+def descrever_saida_geotab() -> str:
+    """Texto curto de como as chamadas Geotab saem — para logs e /status."""
+    return f"proxy:{_host_proxy(GEOTAB_PROXY)}" if GEOTAB_PROXY else "direto"
+
+
 # Sessão HTTP reutilizada com cabeçalhos "de navegador". A API Geotab fica atrás
 # de um WAF (Cloudflare): requisições com o User-Agent padrão 'python-requests/x'
 # saindo de IPs de datacenter (ex.: Render) podem ser barradas com 403 + página
@@ -434,6 +456,9 @@ _HTTP.headers.update({
     "Accept": "application/json",
     "Content-Type": "application/json",
 })
+if GEOTAB_PROXY:
+    _HTTP.proxies.update({"http": GEOTAB_PROXY, "https": GEOTAB_PROXY})
+log.info(f"  • Saída das chamadas Geotab: {descrever_saida_geotab()}")
 
 # Status HTTP tratados como falha TRANSITÓRIA (vale retry): bloqueios momentâneos
 # de WAF (403), rate-limit do edge (429) e indisponibilidades de servidor (5xx).

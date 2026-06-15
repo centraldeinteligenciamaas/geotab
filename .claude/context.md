@@ -46,6 +46,7 @@
 - Quota Geotab: 5000 sub-chamadas/min — throttle proativo em 4500
 - Fuso na busca de eventos: BRT rotulado como UTC "vaza" ~3h p/ dia anterior (floor_dia descarta)
 - `_lock` é POR PROCESSO e cobre TODOS os modos: enquanto um modo roda (ex.: comportamento, que é longo), `/run/<outro>` é descartado. Antes respondia "iniciado" falso; agora responde 409 "ocupado". Se um modo trava (banco lento), starva os demais → tabelas congelam todas juntas.
+- `GEOTAB_PROXY` (env): alterna o IP de saída das chamadas Geotab. Vazio = direto (local, IP limpo). Preenchido (`http://user:senha@host:porta`) = via proxy (Render, p/ furar o bloqueio de WAF). Só afeta requests da Geotab, não o Supabase (psycopg2). Modo ativo aparece em `/status` e `/health` no campo `saida_geotab` (credenciais mascaradas).
 
 ## Próximos passos
 - [x] Banco Supabase estrangulado de IO (2026-06-12): RESOLVIDO — banco suspenso no fim de semana + reiniciado em 2026-06-15, voltou ao normal
