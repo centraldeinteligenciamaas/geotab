@@ -1,8 +1,26 @@
-2026-06-15 13:19:27,544  INFO    • Saída das chamadas Geotab: direto
-2026-06-15 13:19:27,545  INFO  =======================================================
-2026-06-15 13:19:27,545  INFO    Geotab → Supabase  |  modo: viagens
-2026-06-15 13:19:27,545  INFO  =======================================================
-2026-06-15 13:19:28,047  INFO    ✓ Tabelas verificadas no Supabase.
-2026-06-15 13:19:29,577  INFO    ✓ Autenticado no Geotab
+2026-06-15 13:22:45,849  INFO    • Saída das chamadas Geotab: direto
+2026-06-15 13:22:45,849  INFO  =======================================================
+2026-06-15 13:22:45,849  INFO    Geotab → Supabase  |  modo: viagens
+2026-06-15 13:22:45,849  INFO  =======================================================
+2026-06-15 13:22:46,476  INFO    ✓ Tabelas verificadas no Supabase.
+2026-06-15 13:22:47,873  INFO    ✓ Autenticado no Geotab
 
-2026-06-15 13:19:29,577  INFO  Extraindo viagens (ano corrente, geocode=on, lote=25 devices)...
+2026-06-15 13:22:47,873  INFO  Extraindo viagens (ano corrente, geocode=off, lote=25 devices)...
+2026-06-15 13:22:49,786  INFO    • Janela: 2026-01-01 00:00 → 2026-06-15 13:22
+2026-06-15 13:22:49,786  INFO    • Lote 1/70 — 25 dispositivos
+2026-06-15 13:23:51,409  INFO    ✓ tb_viagens: 49478 linhas gravadas.
+2026-06-15 13:23:51,475  INFO    • Lote 2/70 — 25 dispositivos
+2026-06-15 13:24:34,749  INFO    ✓ tb_viagens: 42661 linhas gravadas.
+2026-06-15 13:24:34,811  INFO    • Lote 3/70 — 25 dispositivos
+2026-06-15 13:25:18,339  INFO    ✓ tb_viagens: 45274 linhas gravadas.
+2026-06-15 13:25:18,393  INFO    • Lote 4/70 — 25 dispositivos
+2026-06-15 13:26:05,543  INFO    ✓ tb_viagens: 44462 linhas gravadas.
+2026-06-15 13:26:05,600  INFO    • Lote 5/70 — 25 dispositivos
+2026-06-15 13:26:56,947  INFO    ✓ tb_viagens: 49910 linhas gravadas.
+2026-06-15 13:26:57,005  INFO    • Lote 6/70 — 25 dispositivos
+2026-06-15 13:27:58,784  INFO    ✓ tb_viagens: 58378 linhas gravadas.
+2026-06-15 13:27:58,846  INFO    • Lote 7/70 — 25 dispositivos
+2026-06-15 13:28:53,078  INFO    ✓ tb_viagens: 42212 linhas gravadas.
+2026-06-15 13:28:53,131  INFO    • Lote 8/70 — 25 dispositivos
+2026-06-15 13:29:49,163  INFO    ✓ tb_viagens: 50870 linhas gravadas.
+2026-06-15 13:29:49,222  INFO    • Lote 9/70 — 25 dispositivos
