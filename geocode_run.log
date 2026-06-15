@@ -1,181 +1,66 @@
-2026-06-15 16:10:44,330  INFO    • Saída das chamadas Geotab: direto
-2026-06-15 16:10:50,840  INFO    • Geocode: 83,014 coordenadas distintas pendentes (arredondadas a 3 casas decimais).
-2026-06-15 16:10:50,843  INFO      → geocode lote 1/50 (100 coords)
-2026-06-15 16:10:54,388  INFO      → geocode lote 2/50 (100 coords)
-2026-06-15 16:10:58,138  INFO      → geocode lote 3/50 (100 coords)
-2026-06-15 16:11:01,956  INFO      → geocode lote 4/50 (100 coords)
-2026-06-15 16:11:05,090  INFO      → geocode lote 5/50 (100 coords)
-2026-06-15 16:11:08,200  INFO      → geocode lote 6/50 (100 coords)
-2026-06-15 16:11:12,027  INFO      → geocode lote 7/50 (100 coords)
-2026-06-15 16:11:15,195  INFO      → geocode lote 8/50 (100 coords)
-2026-06-15 16:11:18,922  INFO      → geocode lote 9/50 (100 coords)
-2026-06-15 16:11:22,050  INFO      → geocode lote 10/50 (100 coords)
-2026-06-15 16:11:25,187  INFO      → geocode lote 11/50 (100 coords)
-2026-06-15 16:11:29,255  INFO      → geocode lote 12/50 (100 coords)
-2026-06-15 16:11:32,065  INFO      → geocode lote 13/50 (100 coords)
-2026-06-15 16:11:35,213  INFO      → geocode lote 14/50 (100 coords)
-2026-06-15 16:11:38,941  INFO      → geocode lote 15/50 (100 coords)
-2026-06-15 16:11:42,083  INFO      → geocode lote 16/50 (100 coords)
-2026-06-15 16:11:45,202  INFO      → geocode lote 17/50 (100 coords)
-2026-06-15 16:11:48,947  INFO      → geocode lote 18/50 (100 coords)
-2026-06-15 16:11:52,073  INFO      → geocode lote 19/50 (100 coords)
-2026-06-15 16:11:55,211  INFO      → geocode lote 20/50 (100 coords)
-2026-06-15 16:11:58,957  INFO      → geocode lote 21/50 (100 coords)
-2026-06-15 16:12:02,083  INFO      → geocode lote 22/50 (100 coords)
-2026-06-15 16:12:05,243  INFO      → geocode lote 23/50 (100 coords)
-2026-06-15 16:12:08,969  INFO      → geocode lote 24/50 (100 coords)
-2026-06-15 16:12:12,119  INFO      → geocode lote 25/50 (100 coords)
-2026-06-15 16:12:15,269  INFO      → geocode lote 26/50 (100 coords)
-2026-06-15 16:12:18,969  INFO      → geocode lote 27/50 (100 coords)
-2026-06-15 16:12:22,126  INFO      → geocode lote 28/50 (100 coords)
-2026-06-15 16:12:25,375  INFO      → geocode lote 29/50 (100 coords)
-2026-06-15 16:12:29,044  INFO      → geocode lote 30/50 (100 coords)
-2026-06-15 16:12:32,184  INFO      → geocode lote 31/50 (100 coords)
-2026-06-15 16:12:35,371  INFO      → geocode lote 32/50 (100 coords)
-2026-06-15 16:12:39,344  INFO      → geocode lote 33/50 (100 coords)
-2026-06-15 16:12:43,254  INFO      → geocode lote 34/50 (100 coords)
-2026-06-15 16:12:46,397  INFO      → geocode lote 35/50 (100 coords)
-2026-06-15 16:12:49,542  INFO      → geocode lote 36/50 (100 coords)
-2026-06-15 16:12:53,261  INFO      → geocode lote 37/50 (100 coords)
-2026-06-15 16:12:56,640  INFO      → geocode lote 38/50 (100 coords)
-2026-06-15 16:13:00,327  INFO      → geocode lote 39/50 (100 coords)
-2026-06-15 16:13:03,500  INFO      → geocode lote 40/50 (100 coords)
-2026-06-15 16:13:07,591  INFO      → geocode lote 41/50 (100 coords)
-2026-06-15 16:13:10,862  INFO      → geocode lote 42/50 (100 coords)
-2026-06-15 16:13:14,097  INFO      → geocode lote 43/50 (100 coords)
-2026-06-15 16:13:18,159  INFO      → geocode lote 44/50 (100 coords)
-2026-06-15 16:13:22,521  INFO      → geocode lote 45/50 (100 coords)
-2026-06-15 16:13:26,715  INFO      → geocode lote 46/50 (100 coords)
-2026-06-15 16:13:29,883  INFO      → geocode lote 47/50 (100 coords)
-2026-06-15 16:13:33,500  INFO      → geocode lote 48/50 (100 coords)
-2026-06-15 16:13:36,674  INFO      → geocode lote 49/50 (100 coords)
-2026-06-15 16:13:39,784  INFO      → geocode lote 50/50 (100 coords)
-2026-06-15 16:13:44,642  WARNING    ⚠ Tentativa 1/4 falhou: (psycopg2.errors.DatatypeMismatch) column "lat" is of type numeric but expression is of type text
-LINE 3:                     SELECT lat, lon, endereco FROM tmp_ender...
-                                   ^
-HINT:  You will need to rewrite or cast the expression.
-
-[SQL: 
-                    INSERT INTO tb_enderecos (lat, lon, endereco)
-                    SELECT lat, lon, endereco FROM tmp_enderecos
-                    ON CONFLICT (lat, lon) DO UPDATE SET endereco = EXCLUDED.endereco
-                ]
-(Background on this error at: https://sqlalche.me/e/20/f405). Aguardando 5s...
-2026-06-15 16:13:50,064  WARNING    ⚠ Tentativa 2/4 falhou: (psycopg2.errors.DatatypeMismatch) column "lat" is of type numeric but expression is of type text
-LINE 3:                     SELECT lat, lon, endereco FROM tmp_ender...
-                                   ^
-HINT:  You will need to rewrite or cast the expression.
-
-[SQL: 
-                    INSERT INTO tb_enderecos (lat, lon, endereco)
-                    SELECT lat, lon, endereco FROM tmp_enderecos
-                    ON CONFLICT (lat, lon) DO UPDATE SET endereco = EXCLUDED.endereco
-                ]
-(Background on this error at: https://sqlalche.me/e/20/f405). Aguardando 10s...
-2026-06-15 16:14:00,483  WARNING    ⚠ Tentativa 3/4 falhou: (psycopg2.errors.DatatypeMismatch) column "lat" is of type numeric but expression is of type text
-LINE 3:                     SELECT lat, lon, endereco FROM tmp_ender...
-                                   ^
-HINT:  You will need to rewrite or cast the expression.
-
-[SQL: 
-                    INSERT INTO tb_enderecos (lat, lon, endereco)
-                    SELECT lat, lon, endereco FROM tmp_enderecos
-                    ON CONFLICT (lat, lon) DO UPDATE SET endereco = EXCLUDED.endereco
-                ]
-(Background on this error at: https://sqlalche.me/e/20/f405). Aguardando 20s...
-Traceback (most recent call last):
-  File "C:\Users\ygor.kouzak\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
-    self.dialect.do_execute(
-    ~~~~~~~~~~~~~~~~~~~~~~~^
-        cursor, str_statement, effective_parameters, context
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\ygor.kouzak\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\sqlalchemy\engine\default.py", line 952, in do_execute
-    cursor.execute(statement, parameters)
-    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
-psycopg2.errors.DatatypeMismatch: column "lat" is of type numeric but expression is of type text
-LINE 3:                     SELECT lat, lon, endereco FROM tmp_ender...
-                                   ^
-HINT:  You will need to rewrite or cast the expression.
-
-
-The above exception was the direct cause of the following exception:
-
-Traceback (most recent call last):
-  File "<string>", line 5, in <module>
-    geocodificar_enderecos(cred, eng)
-    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
-  File "C:\Users\ygor.kouzak\Downloads\ProjetosPy\geotab\geotab_supabase.py", line 1450, in geocodificar_enderecos
-    _com_retry(_grava)
-    ~~~~~~~~~~^^^^^^^^
-  File "C:\Users\ygor.kouzak\Downloads\ProjetosPy\geotab\geotab_supabase.py", line 118, in _com_retry
-    return fn()
-  File "C:\Users\ygor.kouzak\Downloads\ProjetosPy\geotab\geotab_supabase.py", line 1443, in _grava
-    conn.execute(text("""
-    ~~~~~~~~~~~~^^^^^^^^^
-        INSERT INTO tb_enderecos (lat, lon, endereco)
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        SELECT lat, lon, endereco FROM tmp_enderecos
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        ON CONFLICT (lat, lon) DO UPDATE SET endereco = EXCLUDED.endereco
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    """))
-    ^^^^^
-  File "C:\Users\ygor.kouzak\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\sqlalchemy\engine\base.py", line 1419, in execute
-    return meth(
-        self,
-        distilled_parameters,
-        execution_options or NO_OPTIONS,
-    )
-  File "C:\Users\ygor.kouzak\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\sqlalchemy\sql\elements.py", line 527, in _execute_on_connection
-    return connection._execute_clauseelement(
-           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
-        self, distilled_params, execution_options
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\ygor.kouzak\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\sqlalchemy\engine\base.py", line 1641, in _execute_clauseelement
-    ret = self._execute_context(
-        dialect,
-    ...<8 lines>...
-        cache_hit=cache_hit,
-    )
-  File "C:\Users\ygor.kouzak\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\sqlalchemy\engine\base.py", line 1846, in _execute_context
-    return self._exec_single_context(
-           ~~~~~~~~~~~~~~~~~~~~~~~~~^
-        dialect, context, statement, parameters
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\ygor.kouzak\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\sqlalchemy\engine\base.py", line 1986, in _exec_single_context
-    self._handle_dbapi_exception(
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
-        e, str_statement, effective_parameters, cursor, context
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\ygor.kouzak\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\sqlalchemy\engine\base.py", line 2363, in _handle_dbapi_exception
-    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
-  File "C:\Users\ygor.kouzak\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
-    self.dialect.do_execute(
-    ~~~~~~~~~~~~~~~~~~~~~~~^
-        cursor, str_statement, effective_parameters, context
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-  File "C:\Users\ygor.kouzak\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\sqlalchemy\engine\default.py", line 952, in do_execute
-    cursor.execute(statement, parameters)
-    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
-sqlalchemy.exc.ProgrammingError: (psycopg2.errors.DatatypeMismatch) column "lat" is of type numeric but expression is of type text
-LINE 3:                     SELECT lat, lon, endereco FROM tmp_ender...
-                                   ^
-HINT:  You will need to rewrite or cast the expression.
-
-[SQL: 
-                    INSERT INTO tb_enderecos (lat, lon, endereco)
-                    SELECT lat, lon, endereco FROM tmp_enderecos
-                    ON CONFLICT (lat, lon) DO UPDATE SET endereco = EXCLUDED.endereco
-                ]
-(Background on this error at: https://sqlalche.me/e/20/f405)
-EXIT_CODE=1
+2026-06-15 16:18:33,910  INFO    • Saída das chamadas Geotab: direto
+2026-06-15 16:18:40,957  INFO    • Geocode: 83,014 coordenadas distintas pendentes (arredondadas a 3 casas decimais).
+2026-06-15 16:18:40,961  INFO      → geocode lote 1/50 (100 coords)
+2026-06-15 16:18:44,467  INFO      → geocode lote 2/50 (100 coords)
+2026-06-15 16:18:47,539  INFO      → geocode lote 3/50 (100 coords)
+2026-06-15 16:18:50,696  INFO      → geocode lote 4/50 (100 coords)
+2026-06-15 16:18:54,472  INFO      → geocode lote 5/50 (100 coords)
+2026-06-15 16:18:57,541  INFO      → geocode lote 6/50 (100 coords)
+2026-06-15 16:19:00,647  INFO      → geocode lote 7/50 (100 coords)
+2026-06-15 16:19:04,538  INFO      → geocode lote 8/50 (100 coords)
+2026-06-15 16:19:07,589  INFO      → geocode lote 9/50 (100 coords)
+2026-06-15 16:19:10,709  INFO      → geocode lote 10/50 (100 coords)
+2026-06-15 16:19:14,487  INFO      → geocode lote 11/50 (100 coords)
+2026-06-15 16:19:17,563  INFO      → geocode lote 12/50 (100 coords)
+2026-06-15 16:19:20,689  INFO      → geocode lote 13/50 (100 coords)
+2026-06-15 16:19:24,492  INFO      → geocode lote 14/50 (100 coords)
+2026-06-15 16:19:27,584  INFO      → geocode lote 15/50 (100 coords)
+2026-06-15 16:19:30,691  INFO      → geocode lote 16/50 (100 coords)
+2026-06-15 16:19:34,556  INFO      → geocode lote 17/50 (100 coords)
+2026-06-15 16:19:37,626  INFO      → geocode lote 18/50 (100 coords)
+2026-06-15 16:19:41,478  INFO      → geocode lote 19/50 (100 coords)
+2026-06-15 16:19:44,555  INFO      → geocode lote 20/50 (100 coords)
+2026-06-15 16:19:47,615  INFO      → geocode lote 21/50 (100 coords)
+2026-06-15 16:19:51,592  INFO      → geocode lote 22/50 (100 coords)
+2026-06-15 16:19:54,553  INFO      → geocode lote 23/50 (100 coords)
+2026-06-15 16:19:57,654  INFO      → geocode lote 24/50 (100 coords)
+2026-06-15 16:20:01,525  INFO      → geocode lote 25/50 (100 coords)
+2026-06-15 16:20:04,576  INFO      → geocode lote 26/50 (100 coords)
+2026-06-15 16:20:07,650  INFO      → geocode lote 27/50 (100 coords)
+2026-06-15 16:20:11,519  INFO      → geocode lote 28/50 (100 coords)
+2026-06-15 16:20:14,592  INFO      → geocode lote 29/50 (100 coords)
+2026-06-15 16:20:17,671  INFO      → geocode lote 30/50 (100 coords)
+2026-06-15 16:20:21,539  INFO      → geocode lote 31/50 (100 coords)
+2026-06-15 16:20:24,599  INFO      → geocode lote 32/50 (100 coords)
+2026-06-15 16:20:27,683  INFO      → geocode lote 33/50 (100 coords)
+2026-06-15 16:20:31,521  INFO      → geocode lote 34/50 (100 coords)
+2026-06-15 16:20:34,594  INFO      → geocode lote 35/50 (100 coords)
+2026-06-15 16:20:37,688  INFO      → geocode lote 36/50 (100 coords)
+2026-06-15 16:20:41,520  INFO      → geocode lote 37/50 (100 coords)
+2026-06-15 16:20:44,600  INFO      → geocode lote 38/50 (100 coords)
+2026-06-15 16:20:47,673  INFO      → geocode lote 39/50 (100 coords)
+2026-06-15 16:20:51,551  INFO      → geocode lote 40/50 (100 coords)
+2026-06-15 16:20:54,657  INFO      → geocode lote 41/50 (100 coords)
+2026-06-15 16:20:57,701  INFO      → geocode lote 42/50 (100 coords)
+2026-06-15 16:21:01,561  INFO      → geocode lote 43/50 (100 coords)
+2026-06-15 16:21:04,643  INFO      → geocode lote 44/50 (100 coords)
+2026-06-15 16:21:09,240  INFO      → geocode lote 45/50 (100 coords)
+2026-06-15 16:21:12,150  INFO      → geocode lote 46/50 (100 coords)
+2026-06-15 16:21:16,059  INFO      → geocode lote 47/50 (100 coords)
+2026-06-15 16:21:19,165  INFO      → geocode lote 48/50 (100 coords)
+2026-06-15 16:21:22,191  INFO      → geocode lote 49/50 (100 coords)
+2026-06-15 16:21:26,067  INFO      → geocode lote 50/50 (100 coords)
+2026-06-15 16:21:30,278  INFO      → 5,000/83,014 endereços no cache
+2026-06-15 16:21:30,373  INFO      → geocode lote 1/50 (100 coords)
+2026-06-15 16:21:34,046  INFO      → geocode lote 2/50 (100 coords)
+2026-06-15 16:21:37,154  INFO      → geocode lote 3/50 (100 coords)
+2026-06-15 16:21:40,943  INFO      → geocode lote 4/50 (100 coords)
+2026-06-15 16:21:44,051  INFO      → geocode lote 5/50 (100 coords)
+2026-06-15 16:21:47,159  INFO      → geocode lote 6/50 (100 coords)
+2026-06-15 16:21:50,982  INFO      → geocode lote 7/50 (100 coords)
+2026-06-15 16:21:54,090  INFO      → geocode lote 8/50 (100 coords)
+2026-06-15 16:21:57,208  INFO      → geocode lote 9/50 (100 coords)
+2026-06-15 16:22:00,962  INFO      → geocode lote 10/50 (100 coords)
+2026-06-15 16:22:04,082  INFO      → geocode lote 11/50 (100 coords)
+2026-06-15 16:22:07,323  INFO      → geocode lote 12/50 (100 coords)
+2026-06-15 16:22:10,972  INFO      → geocode lote 13/50 (100 coords)

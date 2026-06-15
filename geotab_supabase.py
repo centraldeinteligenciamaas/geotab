@@ -1440,9 +1440,11 @@ def geocodificar_enderecos(credentials, engine, casas=None, bloco=5000):
         def _grava():
             with engine.begin() as conn:
                 df.to_sql("tmp_enderecos", conn, if_exists="replace", index=False, chunksize=2000)
+                # lat/lon chegam como TEXT na tmp (Decimal vira object/text no to_sql);
+                # cast explícito p/ numeric — Postgres não faz text→numeric implícito.
                 conn.execute(text("""
                     INSERT INTO tb_enderecos (lat, lon, endereco)
-                    SELECT lat, lon, endereco FROM tmp_enderecos
+                    SELECT lat::numeric, lon::numeric, endereco FROM tmp_enderecos
                     ON CONFLICT (lat, lon) DO UPDATE SET endereco = EXCLUDED.endereco
                 """))
                 conn.execute(text("DROP TABLE IF EXISTS tmp_enderecos"))
