@@ -508,6 +508,13 @@ def _post_geotab(method, params, contexto=""):
     return ultima
 
 
+class GeotabAuthError(RuntimeError):
+    """Falha de autenticação na API Geotab (bloqueio de WAF ou credencial inválida).
+    Levantada em vez de sys.exit para que o erro suba como exceção normal — assim
+    o worker do app.py registra ultimo_erro e o erro aparece em /status, em vez de
+    a thread morrer silenciosamente com SystemExit."""
+
+
 def autenticar():
     """Autentica e respeita o redirecionamento de federation da Geotab.
     Se a resposta trouxer 'path' diferente de 'ThisServer', aponta GEOTAB_SERVIDOR
@@ -529,6 +536,8 @@ def autenticar():
         # Diagnóstico direcionado: 403 + corpo não-JSON = bloqueio de WAF (não é
         # senha errada); 401/InvalidUser = credencial de fato inválida.
         if status == 403 or (status is None and "não-JSON" in msg):
+            motivo = ("bloqueio de WAF (HTTP 403, corpo não-JSON) — IP de saída barrado "
+                      "pelo edge (Cloudflare); NÃO é credencial inválida")
             log.error(
                 "Falha na autenticação Geotab: BLOQUEIO DE WAF (HTTP 403, corpo não-JSON). "
                 "NÃO é credencial inválida — o edge (Cloudflare) barrou a requisição. "
@@ -536,13 +545,19 @@ def autenticar():
                 "Ações: liberar o IP no MyGeotab/suporte ou usar IP de saída fixo/confiável."
             )
         elif status == 401 or "InvalidUserException" in msg or "incorrect" in msg.lower():
+            motivo = ("credencial inválida (HTTP 401) — verifique GEOTAB_DATABASE, "
+                      "GEOTAB_USERNAME e GEOTAB_PASSWORD")
             log.error(
                 "Falha na autenticação Geotab: CREDENCIAL INVÁLIDA (HTTP 401). "
                 "Verifique GEOTAB_DATABASE, GEOTAB_USERNAME e GEOTAB_PASSWORD."
             )
         else:
+            motivo = str(err)
             log.error(f"Falha na autenticação Geotab: {err}")
-        sys.exit(1)
+        # ANTES era sys.exit(1): SystemExit escapava do except do worker (app.py),
+        # a thread morria sem registrar ultimo_erro e o /status ficava "limpo"
+        # enquanto a tabela não atualizava. Levantar exceção normal corrige isso.
+        raise GeotabAuthError(f"Autenticação Geotab falhou: {motivo}")
 
     resultado = resp["result"]
     path = resultado.get("path", "")
@@ -585,6 +600,14 @@ def multicall(credentials, chamadas):
 def extrair_cadastro(credentials):
     log.info("Extraindo cadastro de veículos...")
     veiculos = geotab_get(credentials, "Device")
+    # 0 devices = falha de API (WAF/quota) muito mais provável que frota vazia.
+    # Sem esta guarda, o DataFrame sai vazio, gravar_tabela só loga "vazio" e
+    # retorna, e o /run/cadastro "conclui" sem atualizar nada nem registrar erro.
+    if not veiculos:
+        raise RuntimeError(
+            "Geotab retornou 0 devices — provável falha de API (WAF/quota), não "
+            "frota vazia. Abortando o cadastro para o erro aparecer em /status."
+        )
     grupos   = {
         g.get("id"): g.get("name", "")
         for g in geotab_get(credentials, "Group")

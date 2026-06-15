@@ -47,16 +47,30 @@ def _proximas_execucoes():
     return prox
 
 
-def executar_sync(modo):
+def _disparar(modo):
+    """Tenta iniciar a sync do modo numa thread.
+    Adquire o _lock de forma NÃO-bloqueante e passa a posse para a thread, que o
+    libera no finally. Retorna True se a sync foi iniciada; False se já havia
+    outra sync em execução. Quem chama decide o que fazer com o False: o endpoint
+    HTTP responde 409 (em vez de fingir que iniciou), o scheduler apenas ignora."""
     if not _lock.acquire(blocking=False):
-        log.warning(f"Sync já em execução — ignorando modo={modo}")
-        return
+        log.warning(f"Sync já em execução (modo={_estado['modo_atual']}) — ignorando modo={modo}")
+        return False
     _estado["em_execucao"] = True
     _estado["modo_atual"]  = modo
     _estado["ultimo_erro"] = None
+    threading.Thread(target=_executar_com_lock, args=(modo,), daemon=True).start()
+    return True
+
+
+def _executar_com_lock(modo):
+    """Roda a sync assumindo que o _lock JÁ foi adquirido por _disparar.
+    Captura BaseException (não só Exception) de propósito: uma falha que levante
+    SystemExit/KeyboardInterrupt não pode escapar e deixar o erro invisível em
+    /status nem o lock preso. Libera o lock e zera o estado SEMPRE, no finally."""
     try:
         sync_main(modo)
-    except Exception as exc:
+    except BaseException as exc:
         _estado["ultimo_erro"] = str(exc)
         log.exception(f"Erro durante sync modo={modo}")
     finally:
@@ -134,9 +148,17 @@ def run_sync(modo):
     if modo not in ("all", "cadastro", "status", "comportamento", "viagens"):
         return jsonify({"error": "modo inválido — use: all, cadastro, status, comportamento, viagens"}), 400
 
-    thread = threading.Thread(target=executar_sync, args=(modo,), daemon=True)
-    thread.start()
-    return jsonify({"status": "iniciado", "modo": modo})
+    if _disparar(modo):
+        return jsonify({"status": "iniciado", "modo": modo})
+    # Lock ocupado: outra sync está rodando. Responder 409 (em vez do antigo
+    # "iniciado" incondicional) deixa explícito que ESTA chamada foi descartada —
+    # a tabela NÃO será atualizada agora. Era a causa do "rodei e não atualizou":
+    # o endpoint dizia "iniciado" mesmo quando o pedido era silenciosamente ignorado.
+    return jsonify({
+        "status": "ocupado",
+        "modo_solicitado":  modo,
+        "modo_em_execucao": _estado["modo_atual"],
+    }), 409
 
 
 # ─────────────────────────────────────────────────────────
@@ -151,7 +173,7 @@ scheduler = BackgroundScheduler(timezone=BRT)
 # AGENDA é definida no topo do módulo (fonte única, compartilhada com /status).
 for _modo, _hora, _minuto in AGENDA:
     scheduler.add_job(
-        lambda m=_modo: executar_sync(m),
+        lambda m=_modo: _disparar(m),
         CronTrigger(hour=_hora, minute=_minuto, day_of_week="mon-fri", timezone=BRT),
         id=_modo,
     )
