@@ -65,3 +65,48 @@
 2026-06-16 14:24:41,827  INFO      → odô/dia lote 70/70 (0 device×dia)
 2026-06-16 14:25:07,697  INFO    ✓ Odômetro físico (diário) via 'DiagnosticOdometerAdjustmentId'
 2026-06-16 14:25:36,452  INFO      → odô/dia lote 10/70 (4111 device×dia)
+2026-06-16 14:26:17,985  INFO      → odô/dia lote 20/70 (8626 device×dia)
+2026-06-16 14:27:04,117  INFO      → odô/dia lote 30/70 (13065 device×dia)
+2026-06-16 14:27:42,627  INFO      → odô/dia lote 40/70 (17637 device×dia)
+2026-06-16 14:28:14,113  INFO      → odô/dia lote 50/70 (21962 device×dia)
+2026-06-16 14:28:51,292  INFO      → odô/dia lote 60/70 (25993 device×dia)
+2026-06-16 14:29:23,779  INFO      → odô/dia lote 70/70 (30352 device×dia)
+2026-06-16 14:29:27,975  INFO    ✓ tb_odometro_dia: 30352 linhas (device×dia) gravadas.
+>>> MES 2026-05
+2026-06-16 14:29:28,142  INFO  Odômetro/dia: 2026-05-01 → 2026-05-31
+2026-06-16 14:29:31,971  INFO      → odô/dia lote 10/70 (0 device×dia)
+2026-06-16 14:29:35,980  INFO      → odô/dia lote 20/70 (0 device×dia)
+2026-06-16 14:29:39,810  INFO      → odô/dia lote 30/70 (0 device×dia)
+2026-06-16 14:29:43,886  INFO      → odô/dia lote 40/70 (0 device×dia)
+2026-06-16 14:29:52,740  INFO      → odô/dia lote 50/70 (0 device×dia)
+2026-06-16 14:29:57,236  INFO      → odô/dia lote 60/70 (0 device×dia)
+2026-06-16 14:30:01,297  INFO      → odô/dia lote 70/70 (0 device×dia)
+2026-06-16 14:30:22,029  INFO    ✓ Odômetro físico (diário) via 'DiagnosticOdometerAdjustmentId'
+2026-06-16 14:30:56,287  INFO      → odô/dia lote 10/70 (4907 device×dia)
+2026-06-16 14:31:35,604  INFO      → odô/dia lote 20/70 (10161 device×dia)
+2026-06-16 14:32:56,921  INFO      → odô/dia lote 30/70 (15269 device×dia)
+2026-06-16 14:33:30,834  INFO      → odô/dia lote 40/70 (20294 device×dia)
+2026-06-16 14:34:04,413  INFO      → odô/dia lote 50/70 (25389 device×dia)
+2026-06-16 14:34:38,132  INFO      → odô/dia lote 60/70 (30070 device×dia)
+2026-06-16 14:35:16,193  INFO      → odô/dia lote 70/70 (35215 device×dia)
+2026-06-16 14:35:21,305  INFO    ✓ tb_odometro_dia: 35215 linhas (device×dia) gravadas.
+>>> MES 2026-06
+2026-06-16 14:35:21,723  INFO  Odômetro/dia: 2026-06-01 → 2026-06-16
+2026-06-16 14:35:25,983  INFO      → odô/dia lote 10/70 (0 device×dia)
+2026-06-16 14:35:30,202  INFO      → odô/dia lote 20/70 (0 device×dia)
+2026-06-16 14:35:34,162  INFO      → odô/dia lote 30/70 (0 device×dia)
+2026-06-16 14:35:37,982  INFO      → odô/dia lote 40/70 (0 device×dia)
+2026-06-16 14:35:42,915  INFO      → odô/dia lote 50/70 (0 device×dia)
+2026-06-16 14:35:48,729  INFO      → odô/dia lote 60/70 (0 device×dia)
+2026-06-16 14:35:54,655  INFO      → odô/dia lote 70/70 (0 device×dia)
+2026-06-16 14:36:14,994  INFO    ✓ Odômetro físico (diário) via 'DiagnosticOdometerAdjustmentId'
+2026-06-16 14:36:43,063  INFO      → odô/dia lote 10/70 (2869 device×dia)
+2026-06-16 14:37:16,004  INFO      → odô/dia lote 20/70 (5824 device×dia)
+2026-06-16 14:37:48,232  INFO      → odô/dia lote 30/70 (8686 device×dia)
+2026-06-16 14:38:15,671  INFO      → odô/dia lote 40/70 (11533 device×dia)
+2026-06-16 14:38:52,701  INFO      → odô/dia lote 50/70 (14505 device×dia)
+2026-06-16 14:39:17,807  INFO      → odô/dia lote 60/70 (17143 device×dia)
+2026-06-16 14:39:50,071  INFO      → odô/dia lote 70/70 (19993 device×dia)
+2026-06-16 14:39:54,833  INFO    ✓ tb_odometro_dia: 19993 linhas (device×dia) gravadas.
+FIM
+"EXIT_CODE=$?"
