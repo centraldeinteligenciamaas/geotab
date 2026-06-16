@@ -72,6 +72,13 @@ ODO_LOTE = int(os.environ.get("GEOTAB_ODO_LOTE", 25))
 # mantém o valor anterior (max-merge). No backfill usamos os 6 meses + fallback.
 ODO_INCREMENTAL_DIAS = int(os.environ.get("GEOTAB_ODO_INCREMENTAL_DIAS", 7))
 
+# Piso temporal GLOBAL: o projeto só considera dados de ANO_CORTE em diante
+# ("somente 2026 em todas as tabelas"). Aplicado como floor nas janelas do sync
+# (comportamento, viagens, odômetro, resumo mensal) e na limpeza das tabelas.
+# Bump ANO_CORTE (ou a env) para virar o ano.
+ANO_CORTE  = int(os.environ.get("ANO_CORTE", 2026))
+DATA_CORTE = datetime(ANO_CORTE, 1, 1)
+
 
 # ─────────────────────────────────────────────────────────
 # LOGGING
@@ -940,6 +947,8 @@ def sincronizar_odometro_dia(credentials, engine, lista_ids, data_inicio, data_f
     device por dia, na janela [data_inicio, data_fim]. Upsert por (device, dia):
     re-execução de um dia atualiza o valor. Substitui o odômetro que vivia em
     tb_comportamento — agora consultável por dia e exposto na vw_comportamento."""
+    if data_inicio < DATA_CORTE:   # piso global: somente 2026+
+        data_inicio = DATA_CORTE
     log.info(f"Odômetro/dia: {data_inicio:%Y-%m-%d} → {data_fim:%Y-%m-%d}")
 
     gps_raw = _odo_por_dia_em_lotes(credentials, lista_ids, DIAG_GPS, data_inicio, data_fim)
@@ -978,6 +987,17 @@ def sincronizar_odometro_dia(credentials, engine, lista_ids, data_inicio, data_f
 
     _com_retry(_exec)
     log.info(f"  ✓ tb_odometro_dia: {len(df)} linhas (device×dia) gravadas.")
+
+    # Piso global: remove qualquer odômetro de antes de 2026 (ex.: vazamento de fuso).
+    def _poda_corte():
+        with engine.begin() as conn:
+            return conn.execute(
+                text("DELETE FROM tb_odometro_dia WHERE dia < :corte"),
+                {"corte": DATA_CORTE.date()},
+            ).rowcount
+    n = _com_retry(_poda_corte)
+    if n:
+        log.info(f"  ✓ odômetro/dia: {n} linhas < {ANO_CORTE} removidas (piso).")
 
 
 # ─────────────────────────────────────────────────────────
@@ -1129,7 +1149,9 @@ def sincronizar_comportamento(credentials, engine):
     ids_velocidade, regras_simples = _identificar_regras(credentials)
 
     data_fim       = agora_brt()
-    janela_ini     = _meses_atras(data_fim, 6)
+    # Janela de 6 meses, mas NUNCA antes do piso (somente 2026+). O
+    # _limpar_buckets_antigos(janela_ini_str) então remove o que ficou de 2025.
+    janela_ini     = max(_meses_atras(data_fim, 6), DATA_CORTE)
     janela_ini_str = janela_ini.strftime("%Y-%m-%d")
 
     ultimo_dia = _ler_ultimo_dia_buckets(engine)
@@ -1548,6 +1570,10 @@ def sincronizar_viagens(credentials, engine):
     else:
         # Ano corrente: de 1º de janeiro às 00:00 até agora.
         data_inicio = data_fim.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    # Piso global: nunca antes de 2026 (a poda DELETE data_partida < data_inicio
+    # então remove o que ficou de 2025).
+    if data_inicio < DATA_CORTE:
+        data_inicio = DATA_CORTE
     log.info(f"  • Janela: {data_inicio:%Y-%m-%d %H:%M} → {data_fim:%Y-%m-%d %H:%M}")
 
     total_lotes    = (len(lista_ids) + VIAGENS_DEVICE_LOTE - 1) // VIAGENS_DEVICE_LOTE
@@ -1723,7 +1749,7 @@ def backfill_resumo_mensal(credentials, engine, data_inicio, data_fim):
                 if not isinstance(v, dict) or not v.get("start"):
                     continue
                 ts = ts_brt(v.get("start"))
-                if pd.isna(ts):
+                if pd.isna(ts) or ts.year < ANO_CORTE:   # piso: somente 2026+
                     continue
                 k = (did, ts.year, ts.month)
                 b = agg.get(k)

@@ -1,3 +1,9 @@
 .venv/
 .env
 geotab_sync.log
+# Rotina de atualização local (logs e marcador de "rodou hoje")
+atualizacao_local.log
+.ultima_atualizacao
+# Logs de execuções avulsas (backfills, geocode)
+*_run.log
+__pycache__/

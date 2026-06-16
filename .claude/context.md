@@ -28,6 +28,9 @@
 - GEOCODE por LOOKUP (2026-06-15): endereços ficam em `tb_enderecos` (coord arredondada→endereço), NÃO em tb_viagens. `vw_relatorio_viagens` traz `end_partida`/`end_chegada` por JOIN em `round(lat/lon, 3)`. `geocodificar_enderecos()` (chamada no fim de sincronizar_viagens se VIAGENS_GEOCODE on) é incremental: só geocodifica coords novas. `GEOCODE_CASAS=3` (~110m) dedup ~1,4M→83k coords (geocode trip-a-trip era inviável, dias). IMPORTANTE: o `round(...,3)` da view tem que casar com GEOCODE_CASAS.
 - tb_viagens ENXUTA (2026-06-15): removidas serial/placa/veiculo/grupo/todos_grupos/regional/superintendencia (~190 MB de texto repetido). placa/veiculo/grupo/todos_grupos agora vêm de tb_cadastro via JOIN (por device_id) nas views *_viagens; regional/superintendencia eram peso morto (nenhuma view usava). Resultado: banco 484→259 MB, tb_viagens 429→204 MB, ~241 MB de folga. 0 viagens órfãs (todo device casa com tb_cadastro). 709.767 viagens / 30 dias.
 
+## Piso temporal: SOMENTE 2026 (2026-06-16)
+- `DATA_CORTE`/`ANO_CORTE` (env `ANO_CORTE`, default 2026) em geotab_supabase.py. Nenhuma tabela guarda dados < 2026-01-01. Aplicado como floor nas janelas: comportamento (`janela_ini=max(6m, corte)`), viagens (`data_inicio>=corte`), odômetro (clamp + DELETE <corte), resumo mensal (skip `ts.year<corte`). Limpeza única feita: removidos 2025-12 de comportamento_eventos/odometro_dia/resumo_mensal. Para virar o ano, bump ANO_CORTE.
+
 ## Views e períodos (UMA por tema; header de views.sql) — reorg 2026-06-16
 - `vw_cadastro` — snapshot atual (`atualizado_em`)
 - `vw_status` — tempo real (`snapshot_em`, `ultimo_contato`)
