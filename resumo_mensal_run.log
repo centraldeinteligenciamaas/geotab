@@ -3,3 +3,67 @@
 2026-06-15 17:15:34,450  INFO  Backfill resumo mensal: 2026-01-01 → 2026-01-31
 2026-06-15 17:16:33,761  INFO    • backfill mensal: lote 10/70 (224 device×mês até agora)
 2026-06-15 17:17:37,342  INFO    • backfill mensal: lote 20/70 (441 device×mês até agora)
+2026-06-15 17:18:38,951  INFO    • backfill mensal: lote 30/70 (665 device×mês até agora)
+2026-06-15 17:19:40,467  INFO    • backfill mensal: lote 40/70 (894 device×mês até agora)
+2026-06-15 17:20:28,332  INFO    • backfill mensal: lote 50/70 (1111 device×mês até agora)
+2026-06-15 17:21:22,204  INFO    • backfill mensal: lote 60/70 (1323 device×mês até agora)
+2026-06-15 17:22:29,928  INFO    • backfill mensal: lote 70/70 (1547 device×mês até agora)
+2026-06-15 17:22:31,150  INFO    ✓ resumo mensal: 1547 linhas (device×mês) gravadas.
+2026-06-15 17:22:31,150  INFO    → backfill resumo mensal concluído (1547 device×mês).
+>>> MES 02: 2026-02-01 -> 2026-02-28
+2026-06-15 17:22:31,152  INFO  Backfill resumo mensal: 2026-02-01 → 2026-02-28
+2026-06-15 17:23:40,088  INFO    • backfill mensal: lote 10/70 (213 device×mês até agora)
+2026-06-15 17:24:43,316  INFO    • backfill mensal: lote 20/70 (421 device×mês até agora)
+2026-06-15 17:25:36,926  INFO    • backfill mensal: lote 30/70 (625 device×mês até agora)
+2026-06-15 17:26:20,763  INFO    • backfill mensal: lote 40/70 (838 device×mês até agora)
+2026-06-15 17:27:02,002  INFO    • backfill mensal: lote 50/70 (1037 device×mês até agora)
+2026-06-15 17:27:42,086  INFO    • backfill mensal: lote 60/70 (1232 device×mês até agora)
+2026-06-15 17:28:22,127  INFO    • backfill mensal: lote 70/70 (1439 device×mês até agora)
+2026-06-15 17:28:23,756  INFO    ✓ resumo mensal: 1439 linhas (device×mês) gravadas.
+2026-06-15 17:28:23,756  INFO    → backfill resumo mensal concluído (1439 device×mês).
+>>> MES 03: 2026-03-01 -> 2026-03-31
+2026-06-15 17:28:23,758  INFO  Backfill resumo mensal: 2026-03-01 → 2026-03-31
+2026-06-15 17:29:09,273  INFO    • backfill mensal: lote 10/70 (216 device×mês até agora)
+2026-06-15 17:29:57,097  INFO    • backfill mensal: lote 20/70 (437 device×mês até agora)
+2026-06-15 17:30:38,686  INFO    • backfill mensal: lote 30/70 (655 device×mês até agora)
+2026-06-15 17:31:21,916  INFO    • backfill mensal: lote 40/70 (881 device×mês até agora)
+2026-06-15 17:32:03,528  INFO    • backfill mensal: lote 50/70 (1100 device×mês até agora)
+2026-06-15 17:32:43,713  INFO    • backfill mensal: lote 60/70 (1309 device×mês até agora)
+2026-06-15 17:33:26,428  INFO    • backfill mensal: lote 70/70 (1534 device×mês até agora)
+2026-06-15 17:33:27,528  INFO    ✓ resumo mensal: 1534 linhas (device×mês) gravadas.
+2026-06-15 17:33:27,528  INFO    → backfill resumo mensal concluído (1534 device×mês).
+>>> MES 04: 2026-04-01 -> 2026-04-30
+2026-06-15 17:33:27,530  INFO  Backfill resumo mensal: 2026-04-01 → 2026-04-30
+2026-06-15 17:34:11,043  INFO    • backfill mensal: lote 10/70 (231 device×mês até agora)
+2026-06-15 17:34:56,072  INFO    • backfill mensal: lote 20/70 (478 device×mês até agora)
+2026-06-15 17:35:39,102  INFO    • backfill mensal: lote 30/70 (711 device×mês até agora)
+2026-06-15 17:36:22,775  INFO    • backfill mensal: lote 40/70 (955 device×mês até agora)
+2026-06-15 17:37:06,761  INFO    • backfill mensal: lote 50/70 (1190 device×mês até agora)
+2026-06-15 17:37:47,406  INFO    • backfill mensal: lote 60/70 (1415 device×mês até agora)
+2026-06-15 17:38:30,339  INFO    • backfill mensal: lote 70/70 (1649 device×mês até agora)
+2026-06-15 17:38:31,121  INFO    ✓ resumo mensal: 1649 linhas (device×mês) gravadas.
+2026-06-15 17:38:31,121  INFO    → backfill resumo mensal concluído (1649 device×mês).
+>>> MES 05: 2026-05-01 -> 2026-05-31
+2026-06-15 17:38:31,123  INFO  Backfill resumo mensal: 2026-05-01 → 2026-05-31
+2026-06-15 17:39:17,982  INFO    • backfill mensal: lote 10/70 (252 device×mês até agora)
+2026-06-15 17:40:08,160  INFO    • backfill mensal: lote 20/70 (520 device×mês até agora)
+2026-06-15 17:40:53,391  INFO    • backfill mensal: lote 30/70 (773 device×mês até agora)
+2026-06-15 17:41:39,566  INFO    • backfill mensal: lote 40/70 (1031 device×mês até agora)
+2026-06-15 17:42:26,156  INFO    • backfill mensal: lote 50/70 (1292 device×mês até agora)
+2026-06-15 17:43:09,903  INFO    • backfill mensal: lote 60/70 (1539 device×mês até agora)
+2026-06-15 17:43:57,184  INFO    • backfill mensal: lote 70/70 (1799 device×mês até agora)
+2026-06-15 17:43:58,234  INFO    ✓ resumo mensal: 1799 linhas (device×mês) gravadas.
+2026-06-15 17:43:58,235  INFO    → backfill resumo mensal concluído (1799 device×mês).
+>>> MES 06: 2026-06-01 -> 2026-06-15
+2026-06-15 17:43:58,236  INFO  Backfill resumo mensal: 2026-06-01 → 2026-06-15
+2026-06-15 17:44:30,642  INFO    • backfill mensal: lote 10/70 (250 device×mês até agora)
+2026-06-15 17:44:59,522  INFO    • backfill mensal: lote 20/70 (510 device×mês até agora)
+2026-06-15 17:45:26,038  INFO    • backfill mensal: lote 30/70 (759 device×mês até agora)
+2026-06-15 17:45:53,520  INFO    • backfill mensal: lote 40/70 (1010 device×mês até agora)
+2026-06-15 17:46:22,010  INFO    • backfill mensal: lote 50/70 (1270 device×mês até agora)
+2026-06-15 17:46:47,799  INFO    • backfill mensal: lote 60/70 (1509 device×mês até agora)
+2026-06-15 17:47:14,921  INFO    • backfill mensal: lote 70/70 (1759 device×mês até agora)
+2026-06-15 17:47:15,653  INFO    ✓ resumo mensal: 1759 linhas (device×mês) gravadas.
+2026-06-15 17:47:15,653  INFO    → backfill resumo mensal concluído (1759 device×mês).
+FIM
+"EXIT_CODE=0"

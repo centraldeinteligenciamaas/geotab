@@ -28,14 +28,15 @@
 - GEOCODE por LOOKUP (2026-06-15): endereços ficam em `tb_enderecos` (coord arredondada→endereço), NÃO em tb_viagens. `vw_relatorio_viagens` traz `end_partida`/`end_chegada` por JOIN em `round(lat/lon, 3)`. `geocodificar_enderecos()` (chamada no fim de sincronizar_viagens se VIAGENS_GEOCODE on) é incremental: só geocodifica coords novas. `GEOCODE_CASAS=3` (~110m) dedup ~1,4M→83k coords (geocode trip-a-trip era inviável, dias). IMPORTANTE: o `round(...,3)` da view tem que casar com GEOCODE_CASAS.
 - tb_viagens ENXUTA (2026-06-15): removidas serial/placa/veiculo/grupo/todos_grupos/regional/superintendencia (~190 MB de texto repetido). placa/veiculo/grupo/todos_grupos agora vêm de tb_cadastro via JOIN (por device_id) nas views *_viagens; regional/superintendencia eram peso morto (nenhuma view usava). Resultado: banco 484→259 MB, tb_viagens 429→204 MB, ~241 MB de folga. 0 viagens órfãs (todo device casa com tb_cadastro). 709.767 viagens / 30 dias.
 
-## Views e períodos (header de views.sql)
+## Views e períodos (UMA por tema; header de views.sql) — reorg 2026-06-16
 - `vw_cadastro` — snapshot atual (`atualizado_em`)
 - `vw_status` — tempo real (`snapshot_em`, `ultimo_contato`)
-- `vw_comportamento` — últimos 6 meses (`periodo_ini`, `periodo_fim` = atualizado_em − 6m)
-- `vw_relatorio_viagens` — ano corrente, por viagem (`data_partida`, `data_chegada`)
-- `vw_resumo_frota` — JANELA MÓVEL 30 dias (`data_ini = CURRENT_DATE - 30 days`)
-- `vw_indicadores_produtividade` — JANELA MÓVEL 30 dias; agrupado por `todos_grupos`
-- MENSAIS (filtram por ano/mes no BI): `vw_comportamento_mensal` (dos buckets, ~6m), `vw_resumo_frota_mensal` e `vw_indicadores_mensal` (de `tb_resumo_mensal`, ano 2026). Detalhe (vw_relatorio_viagens) segue 30d; indicadores cobrem o ano via agregado mensal.
+- `vw_comportamento` — POR DIA (device×dia), ~6 meses (`data`, `ano`, `mes`); eventos dos buckets + `odometro`/`odometro_gps` do dia (JOIN tb_odometro_dia). 129k linhas.
+- `vw_relatorio_viagens` — últimos 30 dias, por viagem (`data_partida`, `data_chegada`)
+- `vw_resumo_frota_mensal` — por veículo×mês, ano 2026 (`ano`, `mes`, `ano_mes`)
+- `vw_indicadores_mensal` — por grupo×mês, ano 2026 (`ano`, `mes`, `ano_mes`)
+- REMOVIDAS (2026-06-16): views `vw_comportamento_mensal`/`vw_resumo_frota`/`vw_indicadores_produtividade` (1 view por tema) e a TABELA `tb_comportamento` (dropada). vw_comportamento usa os buckets; odômetro migrou p/ tb_odometro_dia.
+- `tb_odometro_dia` — odômetro POR DIA (device×dia, último valor do dia, físico+GPS). Preenchido por `sincronizar_odometro_dia` (chamado no fim de sincronizar_comportamento; incremental = dias novos). Substitui o odômetro que vivia em tb_comportamento. Funções antigas buscar_odo_gps/fisico/_reconstruir/_ler_odo_anterior removidas; buscar_odo_* viraram código morto.
 - `tb_resumo_mensal` — agregado km/tempo/dias/viagens por device×mês (~21k linhas/ano). Mês corrente: atualizado no sync de viagens via `atualizar_resumo_mes_corrente` (SQL de tb_viagens, sem Geotab). Meses passados: `backfill_resumo_mensal` (Geotab, uma vez). placa/grupo via JOIN tb_cadastro nas views.
 - NOTA: as views VIVAS já estavam em 30 dias; o `views.sql` estava DESATUALIZADO (dizia "ano corrente"). Arquivo sincronizado com o banco em 2026-06-15. Sempre conferir com `pg_get_viewdef` antes de assumir o que o arquivo diz.
 

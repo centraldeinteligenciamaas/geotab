@@ -162,24 +162,8 @@ def criar_tabelas(engine):
             snapshot_em      TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS tb_comportamento (
-            id                       TEXT PRIMARY KEY,
-            serial                   TEXT,
-            placa                    TEXT,
-            todos_grupos             TEXT,
-            excessos_velocidade_6m   INTEGER,
-            aceleracoes_bruscas_6m   INTEGER,
-            frenagens_bruscas_6m     INTEGER,
-            curvas_drasticas_6m      INTEGER,
-            ultimo_excesso_vel       TIMESTAMP,
-            ultima_acel_brusca       TIMESTAMP,
-            ultima_fren_brusca       TIMESTAMP,
-            ultima_curva_drastica    TIMESTAMP,
-            score_risco              INTEGER,
-            odometro                 DOUBLE PRECISION,
-            odometro_gps             DOUBLE PRECISION,
-            atualizado_em            TIMESTAMP
-        );
+        -- tb_comportamento (agregado 6m) FOI REMOVIDA (2026-06-16): vw_comportamento
+        -- passou a ser diária (dos buckets) e o odômetro foi p/ tb_odometro_dia.
 
         -- Enxuta de propósito: placa/veiculo/grupo/todos_grupos NÃO ficam aqui —
         -- são derivados de tb_cadastro (por device_id) nas views. Repetir esse texto
@@ -249,6 +233,19 @@ def criar_tabelas(engine):
             atualizado_em     TIMESTAMP,
             PRIMARY KEY (device_id, ano, mes)
         );
+
+        -- Odômetro POR DIA (último valor lido no dia, por veículo). Substitui o
+        -- odômetro que ficava em tb_comportamento (agregado, removido). A
+        -- vw_comportamento traz odometro/odometro_gps por JOIN no (device_id, dia).
+        CREATE TABLE IF NOT EXISTS tb_odometro_dia (
+            device_id     TEXT,
+            dia           DATE,
+            odometro      DOUBLE PRECISION,
+            odometro_gps  DOUBLE PRECISION,
+            atualizado_em TIMESTAMP,
+            PRIMARY KEY (device_id, dia)
+        );
+        CREATE INDEX IF NOT EXISTS ix_odo_dia_dia ON tb_odometro_dia (dia);
     """
     # Migra colunas existentes de TIMESTAMPTZ → TIMESTAMP (converte UTC → BRT)
     migrar = """
@@ -286,16 +283,11 @@ def criar_tabelas(engine):
         END $$;
     """
     migrar_colunas = """
-        ALTER TABLE tb_comportamento
-            ADD COLUMN IF NOT EXISTS odometro     DOUBLE PRECISION DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS odometro_gps DOUBLE PRECISION DEFAULT 0;
         ALTER TABLE tb_status
             DROP COLUMN IF EXISTS odometro_inicio;
         ALTER TABLE tb_status
             ADD COLUMN IF NOT EXISTS motorista_matricula TEXT,
             ADD COLUMN IF NOT EXISTS todos_grupos        TEXT;
-        ALTER TABLE tb_comportamento
-            ADD COLUMN IF NOT EXISTS todos_grupos TEXT;
         -- Enxugamento (2026-06-15): colunas derivadas de tb_cadastro ou não usadas
         -- por nenhuma view saem de tb_viagens p/ caber no free tier. As views passam
         -- a trazer placa/veiculo/grupo/todos_grupos via JOIN com tb_cadastro. Rode
@@ -308,25 +300,9 @@ def criar_tabelas(engine):
             DROP COLUMN IF EXISTS todos_grupos,
             DROP COLUMN IF EXISTS regional,
             DROP COLUMN IF EXISTS superintendencia;
-        -- Renomeia os contadores _30d → _6m (janela passou de 30 dias p/ 6 meses).
-        DO $$ BEGIN
-            IF EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='tb_comportamento' AND column_name='excessos_velocidade_30d') THEN
-                ALTER TABLE tb_comportamento RENAME COLUMN excessos_velocidade_30d TO excessos_velocidade_6m;
-            END IF;
-            IF EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='tb_comportamento' AND column_name='aceleracoes_bruscas_30d') THEN
-                ALTER TABLE tb_comportamento RENAME COLUMN aceleracoes_bruscas_30d TO aceleracoes_bruscas_6m;
-            END IF;
-            IF EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='tb_comportamento' AND column_name='frenagens_bruscas_30d') THEN
-                ALTER TABLE tb_comportamento RENAME COLUMN frenagens_bruscas_30d TO frenagens_bruscas_6m;
-            END IF;
-            IF EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_name='tb_comportamento' AND column_name='curvas_drasticas_30d') THEN
-                ALTER TABLE tb_comportamento RENAME COLUMN curvas_drasticas_30d TO curvas_drasticas_6m;
-            END IF;
-        END $$;
+        -- tb_comportamento (agregado 6m) REMOVIDA (2026-06-16): vw_comportamento virou
+        -- diária (buckets) e o odômetro foi p/ tb_odometro_dia. Drop idempotente.
+        DROP TABLE IF EXISTS tb_comportamento;
     """
     def _executar():
         with engine.begin() as conn:
@@ -899,6 +875,112 @@ def buscar_odo_fisico(credentials, lista_ids, data_inicio, data_fim, usar_fallba
 
 
 # ─────────────────────────────────────────────────────────
+# ODÔMETRO POR DIA → tb_odometro_dia (consumido por vw_comportamento)
+# ─────────────────────────────────────────────────────────
+def _odo_por_dia_em_lotes(credentials, lista_ids, diag_id, ini, fim, lote=ODO_LOTE):
+    """Consulta StatusData em lotes e reduz a {(device, 'YYYY-MM-DD'): max_raw} —
+    o MAIOR valor lido em cada dia (odômetro é monotônico ⇒ é o último do dia).
+    Dia em BRT (mesma convenção dos eventos). Processa e descarta lote a lote."""
+    mapa = {}
+    total_lotes = (len(lista_ids) + lote - 1) // lote
+    for n, i in enumerate(range(0, len(lista_ids), lote), start=1):
+        sub = lista_ids[i:i + lote]
+        resultados = multicall(credentials, [
+            {
+                "method": "Get",
+                "params": {
+                    "typeName": "StatusData",
+                    "search": {
+                        "deviceSearch":     {"id": did},
+                        "diagnosticSearch": {"id": diag_id},
+                        "fromDate": ini.strftime(FMT),
+                        "toDate":   fim.strftime(FMT),
+                    },
+                },
+            }
+            for did in sub
+        ])
+        for j, resultado in enumerate(resultados):
+            did      = sub[j]
+            leituras = resultado if isinstance(resultado, list) else (resultado or {}).get("result", [])
+            for r in leituras:
+                valor = r.get("data") or 0
+                if not valor:
+                    continue
+                dia, _ = _dia_ts_brt(r.get("dateTime"))
+                if dia is None:
+                    continue
+                k = (did, dia)
+                if valor > mapa.get(k, 0):
+                    mapa[k] = valor
+        del resultados
+        if n % 10 == 0 or n == total_lotes:
+            log.info(f"    → odô/dia lote {n}/{total_lotes} ({len(mapa)} device×dia)")
+        gc.collect()
+    return mapa
+
+
+def _selecionar_diag_fisico(credentials, lista_ids, fim):
+    """Descobre qual diagnóstico de odômetro físico tem dado. Probe BARATO: só uma
+    AMOSTRA de devices numa janela curta (basta achar 1 com leitura por diag).
+    Evita pagar uma varredura cheia só para escolher o diagnóstico."""
+    amostra = lista_ids[:200]
+    ini = fim - timedelta(days=7)
+    for diag in DIAG_ODO_FISICO:
+        m = _max_diag_em_lotes(credentials, amostra, diag, ini, fim)
+        if any(v for v in m.values()):
+            log.info(f"  ✓ Odômetro físico (diário) via '{diag}'")
+            return diag
+    log.warning("  ⚠ Nenhum diagnóstico físico com dado p/ odômetro diário.")
+    return None
+
+
+def sincronizar_odometro_dia(credentials, engine, lista_ids, data_inicio, data_fim):
+    """Preenche tb_odometro_dia com o último odômetro (físico e GPS) de cada
+    device por dia, na janela [data_inicio, data_fim]. Upsert por (device, dia):
+    re-execução de um dia atualiza o valor. Substitui o odômetro que vivia em
+    tb_comportamento — agora consultável por dia e exposto na vw_comportamento."""
+    log.info(f"Odômetro/dia: {data_inicio:%Y-%m-%d} → {data_fim:%Y-%m-%d}")
+
+    gps_raw = _odo_por_dia_em_lotes(credentials, lista_ids, DIAG_GPS, data_inicio, data_fim)
+    diag_fis = _selecionar_diag_fisico(credentials, lista_ids, data_fim)
+    fis_raw  = (_odo_por_dia_em_lotes(credentials, lista_ids, diag_fis, data_inicio, data_fim)
+                if diag_fis else {})
+
+    # GPS sempre em metros (÷1000); físico com unidade inferida.
+    linhas = {}
+    for (did, dia), v in gps_raw.items():
+        linhas.setdefault((did, dia), {"odometro": 0.0, "odometro_gps": 0.0})["odometro_gps"] = round(v / 1000, 2)
+    for (did, dia), v in fis_raw.items():
+        linhas.setdefault((did, dia), {"odometro": 0.0, "odometro_gps": 0.0})["odometro"] = _inferir_km(v)
+
+    if not linhas:
+        log.info("  • Odômetro/dia: nada a gravar.")
+        return
+
+    df = pd.DataFrame([
+        {"device_id": did, "dia": dia, "odometro": v["odometro"],
+         "odometro_gps": v["odometro_gps"], "atualizado_em": agora_brt()}
+        for (did, dia), v in linhas.items()
+    ])
+
+    def _exec():
+        with engine.begin() as conn:
+            df.to_sql("tmp_odo_dia", conn, if_exists="replace", index=False, chunksize=5000)
+            conn.execute(text("""
+                INSERT INTO tb_odometro_dia (device_id, dia, odometro, odometro_gps, atualizado_em)
+                SELECT device_id, dia::date, odometro, odometro_gps, atualizado_em FROM tmp_odo_dia
+                ON CONFLICT (device_id, dia) DO UPDATE SET
+                    odometro=EXCLUDED.odometro, odometro_gps=EXCLUDED.odometro_gps,
+                    atualizado_em=EXCLUDED.atualizado_em
+            """))
+            conn.execute(text("DROP TABLE IF EXISTS tmp_odo_dia"))
+
+    _com_retry(_exec)
+    log.info(f"  ✓ tb_odometro_dia: {len(df)} linhas (device×dia) gravadas.")
+
+
+# ─────────────────────────────────────────────────────────
 # TABELA 3 — COMPORTAMENTO
 # ─────────────────────────────────────────────────────────
 def _meses_atras(dt, n):
@@ -1028,98 +1110,21 @@ def _limpar_buckets_antigos(engine, limite_dia):
     log.info(f"  ✓ {apagados} buckets fora da janela (dia < {limite_dia}) removidos.")
 
 
-def _ler_odo_anterior(engine):
-    """{device_id: (odometro_fisico, odometro_gps)} já gravados em tb_comportamento.
-    Usado no incremental para manter o valor de quem não reportou na janela curta."""
-    def _exec():
-        with engine.connect() as conn:
-            return conn.execute(
-                text("SELECT id, odometro, odometro_gps FROM tb_comportamento")
-            ).all()
-    rows = _com_retry(_exec)
-    return {r[0]: (r[1] or 0, r[2] or 0) for r in rows}
-
-
-def _reconstruir_comportamento(engine, base_rows, janela_ini, agora):
-    """Reconstrói tb_comportamento somando os buckets dos últimos 6 meses
-    (dia >= janela_ini) por device/tipo e juntando serial/placa/grupos/odômetro
-    vindos de base_rows. Faz upsert por id."""
-    base_df = pd.DataFrame(base_rows)
-
-    def _exec():
-        with engine.begin() as conn:
-            base_df.to_sql("tmp_comp_base", conn, if_exists="replace", index=False, chunksize=2000)
-            conn.execute(text("""
-                INSERT INTO tb_comportamento (
-                    id, serial, placa, todos_grupos,
-                    excessos_velocidade_6m, aceleracoes_bruscas_6m,
-                    frenagens_bruscas_6m, curvas_drasticas_6m,
-                    ultimo_excesso_vel, ultima_acel_brusca,
-                    ultima_fren_brusca, ultima_curva_drastica,
-                    score_risco, odometro, odometro_gps, atualizado_em
-                )
-                SELECT
-                    b.device_id, b.serial, b.placa, b.todos_grupos,
-                    COALESCE(ev.qtd,0), COALESCE(ac.qtd,0),
-                    COALESCE(fr.qtd,0), COALESCE(cu.qtd,0),
-                    ev.ultimo, ac.ultimo, fr.ultimo, cu.ultimo,
-                    COALESCE(ev.qtd,0)*3 + COALESCE(ac.qtd,0)*2
-                        + COALESCE(fr.qtd,0)*2 + COALESCE(cu.qtd,0)*1,
-                    b.odometro, b.odometro_gps, :agora
-                FROM tmp_comp_base b
-                LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
-                           FROM tb_comportamento_eventos
-                           WHERE dia >= CAST(:ini AS date) AND tipo='excesso_velocidade'
-                           GROUP BY device_id) ev ON ev.device_id = b.device_id
-                LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
-                           FROM tb_comportamento_eventos
-                           WHERE dia >= CAST(:ini AS date) AND tipo='aceleracao_brusca'
-                           GROUP BY device_id) ac ON ac.device_id = b.device_id
-                LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
-                           FROM tb_comportamento_eventos
-                           WHERE dia >= CAST(:ini AS date) AND tipo='frenagem_brusca'
-                           GROUP BY device_id) fr ON fr.device_id = b.device_id
-                LEFT JOIN (SELECT device_id, SUM(qtd) qtd, MAX(ultimo_ts) ultimo
-                           FROM tb_comportamento_eventos
-                           WHERE dia >= CAST(:ini AS date) AND tipo='curva_drastica'
-                           GROUP BY device_id) cu ON cu.device_id = b.device_id
-                ON CONFLICT (id) DO UPDATE SET
-                    serial=EXCLUDED.serial, placa=EXCLUDED.placa,
-                    todos_grupos=EXCLUDED.todos_grupos,
-                    excessos_velocidade_6m=EXCLUDED.excessos_velocidade_6m,
-                    aceleracoes_bruscas_6m=EXCLUDED.aceleracoes_bruscas_6m,
-                    frenagens_bruscas_6m=EXCLUDED.frenagens_bruscas_6m,
-                    curvas_drasticas_6m=EXCLUDED.curvas_drasticas_6m,
-                    ultimo_excesso_vel=EXCLUDED.ultimo_excesso_vel,
-                    ultima_acel_brusca=EXCLUDED.ultima_acel_brusca,
-                    ultima_fren_brusca=EXCLUDED.ultima_fren_brusca,
-                    ultima_curva_drastica=EXCLUDED.ultima_curva_drastica,
-                    score_risco=EXCLUDED.score_risco,
-                    odometro=EXCLUDED.odometro, odometro_gps=EXCLUDED.odometro_gps,
-                    atualizado_em=EXCLUDED.atualizado_em
-            """), {"ini": janela_ini, "agora": agora})
-            conn.execute(text("DROP TABLE IF EXISTS tmp_comp_base"))
-
-    _com_retry(_exec)
-    log.info(f"  ✓ tb_comportamento reconstruída de {len(base_df)} devices.")
-
-
 def sincronizar_comportamento(credentials, engine):
     """Sincroniza o comportamento (janela móvel de 6 meses) de forma incremental.
 
     1ª execução (tb_comportamento_eventos vazia) = BACKFILL: conta os 6 meses
     inteiros. Execuções seguintes = INCREMENTAL: recontam só do último dia já
     gravado (que pode ter ficado parcial) até agora. Os eventos viram buckets
-    diários (device/dia/tipo); tb_comportamento é então reconstruída somando os
-    buckets dos últimos 6 meses. Buckets fora da janela são apagados."""
+    diários (device/dia/tipo) — consumidos pela vw_comportamento (diária). O
+    odômetro do dia vai p/ tb_odometro_dia. Buckets fora da janela são apagados.
+    serial/placa/grupos NÃO são gravados aqui — vêm de tb_cadastro na view."""
     log.info("Sincronizando comportamento (6 meses, incremental por buckets diários)...")
 
     veiculos   = geotab_get(credentials, "Device")
     lista_ids  = [v.get("id") for v in veiculos]
     ids_set    = set(lista_ids)
-    serial_map = {v.get("id"): v.get("serialNumber", "") for v in veiculos}
-    placa_map  = {v.get("id"): v.get("licensePlate", "") for v in veiculos}
-    grupos_map = _mapa_todos_grupos(credentials, veiculos)
+    del veiculos
 
     ids_velocidade, regras_simples = _identificar_regras(credentials)
 
@@ -1241,33 +1246,10 @@ def sincronizar_comportamento(credentials, engine):
     gc.collect()
     _limpar_buckets_antigos(engine, janela_ini_str)
 
-    # ── Odômetro: backfill usa 6 meses + fallback; incremental usa janela curta ──
-    if backfill:
-        odo_gps_map    = buscar_odo_gps(credentials, lista_ids, janela_ini, data_fim)
-        odo_fisico_map = buscar_odo_fisico(credentials, lista_ids, janela_ini, data_fim)
-    else:
-        recente = data_fim - timedelta(days=ODO_INCREMENTAL_DIAS)
-        odo_gps_map    = buscar_odo_gps(credentials, lista_ids, recente, data_fim, usar_fallback=False)
-        odo_fisico_map = buscar_odo_fisico(credentials, lista_ids, recente, data_fim, usar_fallback=False)
-        # Odômetro é monotônico → mantém o maior entre a leitura nova e a anterior
-        # (quem não reportou na janela curta preserva o valor já gravado).
-        prev = _ler_odo_anterior(engine)
-        odo_gps_map    = {did: max(odo_gps_map.get(did, 0),    prev.get(did, (0, 0))[1]) for did in lista_ids}
-        odo_fisico_map = {did: max(odo_fisico_map.get(did, 0), prev.get(did, (0, 0))[0]) for did in lista_ids}
-
-    # ── Reconstrói tb_comportamento a partir dos buckets dos últimos 6 meses ──
-    base_rows = [
-        {
-            "device_id":    did,
-            "serial":       serial_map.get(did, ""),
-            "placa":        placa_map.get(did, ""),
-            "todos_grupos": grupos_map.get(did, ""),
-            "odometro":     odo_fisico_map.get(did, 0),
-            "odometro_gps": odo_gps_map.get(did, 0),
-        }
-        for did in lista_ids
-    ]
-    _reconstruir_comportamento(engine, base_rows, janela_ini_str, data_fim)
+    # ── Odômetro POR DIA → tb_odometro_dia (exposto na vw_comportamento por JOIN) ──
+    # backfill = mesma janela de 6 meses dos buckets; incremental = só os dias novos
+    # (desde o último dia gravado). Não há mais reconstrução de tb_comportamento.
+    sincronizar_odometro_dia(credentials, engine, lista_ids, desde, data_fim)
     log.info(f"  → comportamento sincronizado ({'backfill' if backfill else 'incremental'}).")
 
 

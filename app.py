@@ -119,7 +119,7 @@ def status():
         with engine.connect() as conn:
             ult["cadastro"]      = conn.execute(text("SELECT MAX(atualizado_em) FROM tb_cadastro")).scalar()
             ult["status"]        = conn.execute(text("SELECT MAX(snapshot_em)   FROM tb_status")).scalar()
-            ult["comportamento"] = conn.execute(text("SELECT MAX(atualizado_em) FROM tb_comportamento")).scalar()
+            ult["comportamento"] = conn.execute(text("SELECT MAX(dia) FROM tb_comportamento_eventos")).scalar()
             ult["viagens"]       = conn.execute(text("SELECT MAX(atualizado_em) FROM tb_viagens")).scalar()
         engine.dispose()
     except Exception as exc:

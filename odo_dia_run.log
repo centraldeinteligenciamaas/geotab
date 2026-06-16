@@ -1,0 +1,15 @@
+2026-06-16 13:53:12,468  INFO    • Saída das chamadas Geotab: direto
+>>> MES 2025-12
+2026-06-16 13:53:15,757  INFO  Odômetro/dia: 2025-12-01 → 2025-12-31
+2026-06-16 13:53:20,434  INFO      → odô/dia lote 10/70 (0 device×dia)
+2026-06-16 13:53:24,802  INFO      → odô/dia lote 20/70 (0 device×dia)
+2026-06-16 13:53:28,886  INFO      → odô/dia lote 30/70 (0 device×dia)
+2026-06-16 13:53:32,932  INFO      → odô/dia lote 40/70 (0 device×dia)
+2026-06-16 13:53:36,691  INFO      → odô/dia lote 50/70 (0 device×dia)
+2026-06-16 13:53:40,864  INFO      → odô/dia lote 60/70 (0 device×dia)
+2026-06-16 13:53:45,333  INFO      → odô/dia lote 70/70 (0 device×dia)
+2026-06-16 13:54:35,770  INFO    ✓ Odômetro físico (diário) via 'DiagnosticOdometerAdjustmentId'
+2026-06-16 13:55:09,957  INFO      → odô/dia lote 10/70 (4023 device×dia)
+2026-06-16 13:55:45,808  INFO      → odô/dia lote 20/70 (8219 device×dia)
+2026-06-16 13:56:19,905  INFO      → odô/dia lote 30/70 (12240 device×dia)
+2026-06-16 13:56:56,020  INFO      → odô/dia lote 40/70 (16388 device×dia)
