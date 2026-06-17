@@ -49,6 +49,8 @@ SUPABASE = {
     "banco":   os.environ["SUPABASE_BANCO"],
     "usuario": os.environ["SUPABASE_USUARIO"],
     "senha":   os.environ["SUPABASE_SENHA"],
+    # require: nuvem (Supabase exige SSL). disable: Postgres local sem SSL.
+    "sslmode": os.environ.get("SUPABASE_SSLMODE", "require"),
 }
 
 # GPS: acumulado pelo device Geotab desde a instalação — sempre em metros.
@@ -103,7 +105,7 @@ def criar_engine():
         host=cfg["host"],
         port=cfg["porta"],
         database=cfg["banco"],
-        query={"sslmode": "require"},
+        query={"sslmode": cfg["sslmode"]},
     )
     # NullPool: o app NUNCA segura conexão ociosa — cada checkout abre uma conexão
     # nova e a fecha ao devolver. No pooler do Supabase em TRANSACTION mode (porta
@@ -821,64 +823,6 @@ def _max_diag_em_lotes(credentials, lista_ids, diag_id, ini, fim, lote=ODO_LOTE)
         del resultados
         gc.collect()
     return mapa
-
-
-def _com_fallback_ano(credentials, lista_ids, diag_id, data_inicio, mapa_raw):
-    """Para devices sem leitura na janela, busca no ano anterior."""
-    sem_dado = [did for did, v in mapa_raw.items() if not v]
-    if not sem_dado:
-        return
-    um_ano   = data_inicio - timedelta(days=365)
-    fallback = _max_diag_em_lotes(credentials, sem_dado, diag_id, um_ano, data_inicio)
-    for did, v in fallback.items():
-        if v:
-            mapa_raw[did] = v
-    recuperados = sum(1 for did in sem_dado if mapa_raw[did])
-    log.info(f"    → {recuperados}/{len(sem_dado)} recuperados no fallback 1 ano")
-
-
-def buscar_odo_gps(credentials, lista_ids, data_inicio, data_fim, usar_fallback=True):
-    """Retorna {device_id: km} via GPS (DiagnosticDeviceTotalDistanceId).
-    Valores sempre em metros → divide por 1000.
-    usar_fallback=False pula a busca de 1 ano (modo incremental: janela curta,
-    devices sem leitura mantêm o valor anterior via max-merge no chamador)."""
-    log.info(f"  • GPS odômetro via '{DIAG_GPS}'...")
-    mapa_raw = _max_diag_em_lotes(credentials, lista_ids, DIAG_GPS, data_inicio, data_fim)
-    if usar_fallback:
-        _com_fallback_ano(credentials, lista_ids, DIAG_GPS, data_inicio, mapa_raw)
-    mapa_km = {did: round(v / 1000, 2) if v else 0.0 for did, v in mapa_raw.items()}
-    com_dado = sum(1 for v in mapa_km.values() if v > 0)
-    log.info(f"    → {com_dado}/{len(lista_ids)} veículos com dado GPS")
-    return mapa_km
-
-
-def buscar_odo_fisico(credentials, lista_ids, data_inicio, data_fim, usar_fallback=True):
-    """Retorna {device_id: km} via OBD2 (odômetro físico do veículo).
-    Testa DIAG_ODO_FISICO em ordem; unidade inferida automaticamente por _inferir_km.
-    usar_fallback=False pula a busca de 1 ano (modo incremental)."""
-    for diag_id in DIAG_ODO_FISICO:
-        log.info(f"  • Odômetro físico via '{diag_id}'...")
-        mapa_raw = _max_diag_em_lotes(credentials, lista_ids, diag_id, data_inicio, data_fim)
-        if usar_fallback:
-            _com_fallback_ano(credentials, lista_ids, diag_id, data_inicio, mapa_raw)
-
-        mapa_km     = {did: _inferir_km(v) for did, v in mapa_raw.items()}
-        encontrados = sum(1 for v in mapa_km.values() if v > 0)
-        log.info(f"    → {encontrados}/{len(lista_ids)} veículos com dado físico")
-
-        if encontrados > 0:
-            # Loga amostra para validar unidade inferida
-            amostras = [(did, mapa_raw[did], mapa_km[did])
-                        for did, v in mapa_km.items() if v > 0][:3]
-            for did, raw, km in amostras:
-                unidade = "metros" if raw > 1_000_000 else "km"
-                log.info(f"    └ device {did}: raw={raw:.0f} ({unidade}) → {km} km")
-            log.info(f"  ✓ Diagnóstico físico selecionado: '{diag_id}'")
-            return mapa_km
-
-    log.warning(f"  ⚠ Nenhum diagnóstico OBD2 disponível: {DIAG_ODO_FISICO}")
-    log.warning("  ⚠ Verifique o log SONDA — odometro ficará 0 para todos os veículos.")
-    return {did: 0.0 for did in lista_ids}
 
 
 # ─────────────────────────────────────────────────────────

@@ -2,22 +2,23 @@
 
 ## Stack
 - Python (Flask + APScheduler + SQLAlchemy/psycopg2 + pandas + requests)
-- Banco: Supabase (Postgres, pooler transaction mode porta 6543, NullPool)
-- Deploy: Render free tier (512 MB) — render.yaml
-- Config via .env (credenciais Geotab + Supabase)
+- Banco: **PostgreSQL LOCAL 18.4** (portátil em `C:\Users\ygor.kouzak\pgsql\pgsql\bin`, dados em `C:\Users\ygor.kouzak\pgdata`, porta 5432, sslmode=disable). Migrado do Supabase em 2026-06-17.
+- Deploy: **LOCAL** (Render aposentado — IP era bloqueado pelo WAF da Geotab). Sync via `atualizar_local.py` no logon.
+- Config via .env (credenciais Geotab + conexão local nas mesmas chaves SUPABASE_*)
 
-## Como rodar
-- `python app.py` — sobe Flask na porta 5000 com scheduler
-- Sync manual: `GET /run/<modo>` (cadastro | status | comportamento | viagens) com `?key=SYNC_API_KEY`
-  - Responde `{"status":"iniciado"}` se conseguiu o lock; `409 {"status":"ocupado", ...}` se outra sync já está rodando (NÃO mais "iniciado" falso)
-- `GET /status` — últimas atualizações + próximas execuções (ver `ultimo_erro`)
+## Como rodar (LOCAL — não há mais servidor web)
+- Postgres local sobe no logon via `iniciar_postgres.bat` (pasta Inicializar). Manual: `pg_ctl -D C:\Users\ygor.kouzak\pgdata start`.
+- Sync: `python geotab_supabase.py <modo>` (cadastro | status | comportamento | viagens). O orquestrador é `atualizar_local.py` (roda os 4 em sequência, seg-sex, 1x/dia).
+- Agendamento: Tarefa `GeotabSyncLocal` — gatilho no logon + seg-sex 08:00 com `WakeToRun` (acorda do sleep/hibernate; wake timers habilitados no plano de energia). NÃO acorda do desligado.
+- app.py/Flask/APScheduler/endpoints /run /status: REMOVIDOS (2026-06-17). Status agora = SQL direto (DBeaver/psql).
 
 ## Arquitetura (mapa de arquivos)
-- `app.py` — Flask + agendamento (BRT, seg-sex): cadastro 04h, status 05h, comportamento 06h, viagens 21h; lock impede syncs simultâneos
-- `geotab_supabase.py` — extração da API Geotab (JSON-RPC) e gravação no Supabase; cria/migra tabelas; throttle de quota (4500 sub-chamadas/60s)
-- `views.sql` — definição atual das 6 views (com períodos documentados no header)
-- `views_backup.sql` — backup das views
-- `render.yaml` — config do deploy no Render
+- `geotab_supabase.py` — extração da API Geotab (JSON-RPC) e gravação no Postgres; cria/migra tabelas; throttle de quota (4500 sub-chamadas/60s). Conexão lê `SUPABASE_*` do .env (agora apontam p/ localhost) + `SUPABASE_SSLMODE`.
+- `atualizar_local.py` — orquestrador local: roda os 4 modos em subprocesso, seg-sex, 1x/dia (marcador `.ultima_atualizacao`). Disparado pela Tarefa `GeotabSyncLocal`.
+- `iniciar_postgres.bat` — sobe o Postgres local (pasta Inicializar/logon).
+- `backup_geotab.bat` — pg_dump diário p/ `C:\Users\ygor.kouzak\backups` (mantém 14 dias; pasta Inicializar/logon).
+- `views.sql` / `views_backup.sql` — definição/backup das views.
+- (REMOVIDOS 2026-06-17: `app.py`, `render.yaml`, gunicorn/Flask/APScheduler.)
 
 ## Tabelas e períodos
 - `tb_cadastro` — snapshot atual da frota (full refresh; `atualizado_em`)
@@ -39,7 +40,7 @@
 - `vw_resumo_frota_mensal` — por veículo×mês, ano 2026 (`ano`, `mes`, `ano_mes`)
 - `vw_indicadores_mensal` — por grupo×mês, ano 2026 (`ano`, `mes`, `ano_mes`)
 - REMOVIDAS (2026-06-16): views `vw_comportamento_mensal`/`vw_resumo_frota`/`vw_indicadores_produtividade` (1 view por tema) e a TABELA `tb_comportamento` (dropada). vw_comportamento usa os buckets; odômetro migrou p/ tb_odometro_dia.
-- `tb_odometro_dia` — odômetro POR DIA (device×dia, último valor do dia, físico+GPS). Preenchido por `sincronizar_odometro_dia` (chamado no fim de sincronizar_comportamento; incremental = dias novos). Substitui o odômetro que vivia em tb_comportamento. Funções antigas buscar_odo_gps/fisico/_reconstruir/_ler_odo_anterior removidas; buscar_odo_* viraram código morto.
+- `tb_odometro_dia` — odômetro POR DIA (device×dia, último valor do dia, físico+GPS). Preenchido por `sincronizar_odometro_dia` (chamado no fim de sincronizar_comportamento; incremental = dias novos). Substitui o odômetro que vivia em tb_comportamento. Funções antigas buscar_odo_gps/fisico/_com_fallback_ano/_reconstruir/_ler_odo_anterior TODAS removidas (limpeza 2026-06-17).
 - `tb_resumo_mensal` — agregado km/tempo/dias/viagens por device×mês (~21k linhas/ano). Mês corrente: atualizado no sync de viagens via `atualizar_resumo_mes_corrente` (SQL de tb_viagens, sem Geotab). Meses passados: `backfill_resumo_mensal` (Geotab, uma vez). placa/grupo via JOIN tb_cadastro nas views.
 - NOTA: as views VIVAS já estavam em 30 dias; o `views.sql` estava DESATUALIZADO (dizia "ano corrente"). Arquivo sincronizado com o banco em 2026-06-15. Sempre conferir com `pg_get_viewdef` antes de assumir o que o arquivo diz.
 
@@ -68,7 +69,7 @@
 
 ## Gotchas / armadilhas (sessão 2026-06-12)
 - Projeto Supabase do geotab (ref dyqrxszogdcsjnhodmrv) está em OUTRA conta — integração MCP só vê "automultas"
-- `check_lints.py` (raiz) — script de diagnóstico de conexão/lints; rodar com PYTHONIOENCODING=utf-8 (console cp1252 quebra com "→")
+- (check_lints.py / est_volume.py: REMOVIDOS 2026-06-17 — eram diagnósticos da era Supabase/free-tier, sem sentido no local.)
 - Lints corrigidos com: ALTER VIEW ... SET (security_invoker = on) + ALTER TABLE ... ENABLE ROW LEVEL SECURITY (sem policies — consumo é só conexão direta como owner)
 
 ## LIMITE DE DISCO ESTOURADO (2026-06-15) — banco em READ-ONLY
@@ -79,8 +80,17 @@
 ## Bug corrigido (2026-06-15)
 - `_limpar_buckets_antigos` e `_reconstruir_comportamento` usavam bind colado no cast PG (`:lim::date`, `:ini::date`). SQLAlchemy 2.0/psycopg2 não substitui o bind nesse formato → "syntax error at or near :". Corrigido p/ `CAST(:param AS date)`. (A contagem + upsert de buckets já tinha rodado; o erro era só na limpeza/reconstrução.)
 
+## MIGRAÇÃO Supabase → Postgres LOCAL (2026-06-17)
+- MOTIVO: Supabase free 500 MB estourado (banco a 671 MB) + RAM 512 MB do Render + IP do Render bloqueado pelo WAF da Geotab. Local resolve os 3 de graça.
+- FEITO: PG 18.4 portátil (sem admin, zip já extraído). `initdb` em `C:\Users\ygor.kouzak\pgdata`, senha postgres = `geotab_iAGEz2pmgDhf`. Banco `geotab` criado. Dump do Supabase (session pooler porta 5432, `-n public --no-owner --no-acl`) → restore local. 7 tabelas + 7 views migradas; tb_enderecos (83k, cache geocode) e tb_viagens (2,1M) preservados.
+- CÓDIGO: `criar_engine()` agora lê `SUPABASE_SSLMODE` de env (default require p/ nuvem; local=disable). Única mudança.
+- .env repontado p/ localhost:5432/geotab; `VIAGENS_DIAS=0` (ano inteiro, sem limite de disco). Supabase antigo comentado p/ rollback.
+- AUTOMAÇÃO (sem admin — criar tarefa no Agendador dá "Acesso negado" por GPO): `iniciar_postgres.bat` + `backup_geotab.bat` na pasta Inicializar (`shell:startup`) → rodam no logon. Sync continua na task `GeotabSyncLocal` (já existia). Backup diário (1/dia por data, mantém 14d) em `C:\Users\ygor.kouzak\backups`.
+- LIGAR SOZINHO: inviável (notebook corporativo, sem admin/BIOS, GPO trava wake timers). Modelo é "liga o PC num dia útil → sync roda no logon".
+- FEITO (usuário, 2026-06-17): On-premises Data Gateway configurado + dataset Power BI repontado p/ localhost; serviço do Render deletado. Inspeção via DBeaver (localhost:5432/geotab/postgres).
+
 ## Última sessão
-- Data: 2026-06-15
+- Data: 2026-06-17 (migração concluída; antes: 2026-06-15)
 - Resumo: Banco recuperado (suspenso no fim de semana + reiniciado hoje). Diagnosticado o "rodei /run/cadastro e não atualizou": no momento da chamada o comportamento segurava o `_lock`, a thread do cadastro foi descartada, mas `/run` respondia "iniciado" falso (sem registrar erro). Correções aplicadas:
   - `app.py`: `executar_sync` → `_disparar` (adquire lock e passa p/ thread) + `_executar_com_lock` (captura BaseException). `/run/<modo>` agora responde 409 "ocupado" quando o lock está tomado.
   - `geotab_supabase.py`: `autenticar()` levanta `GeotabAuthError` em vez de `sys.exit(1)` (SystemExit escapava do except do worker); `extrair_cadastro` aborta com erro se a Geotab retorna 0 devices (não grava vazio em silêncio).
