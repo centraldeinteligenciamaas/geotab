@@ -275,6 +275,20 @@ def criar_tabelas(engine):
             PRIMARY KEY (device_id, dia)
         );
         CREATE INDEX IF NOT EXISTS ix_odo_dia_dia ON tb_odometro_dia (dia);
+
+        -- Dimensão de MOTORISTAS (entidade User da Geotab). lotacao = grupo ULOT_
+        -- (unidade de lotação) do motorista; todos_grupos = cadeia SUP_|REG_|ULOT_.
+        -- Usada pela vw_motoristas (JOIN por id = motorista_id de tb_viagens).
+        CREATE TABLE IF NOT EXISTS tb_motoristas (
+            id             TEXT PRIMARY KEY,
+            nome           TEXT,
+            matricula      TEXT,
+            lotacao        TEXT,
+            regional       TEXT,
+            superintendencia TEXT,
+            todos_grupos   TEXT,
+            atualizado_em  TIMESTAMP
+        );
     """
     # Migra colunas existentes de TIMESTAMPTZ → TIMESTAMP (converte UTC → BRT)
     migrar = """
@@ -703,6 +717,45 @@ def extrair_cadastro(credentials):
         })
     df = pd.DataFrame(rows)
     log.info(f"  → {len(df)} veículos")
+    return df
+
+
+def extrair_motoristas(credentials):
+    """Dimensão de motoristas (entidade User). A lotação vem de companyGroups:
+    cada motorista tem a cadeia SUP_<superintendência> | REG_<regional> |
+    ULOT_<unidade de lotação>. lotacao = grupo ULOT_ (fallback: 1º grupo útil)."""
+    log.info("Extraindo motoristas (cadastro/lotação)...")
+    grupos = {g.get("id"): g.get("name", "") for g in geotab_get(credentials, "Group")}
+    users  = geotab_get(credentials, "User")
+    if not users:
+        raise RuntimeError(
+            "Geotab retornou 0 users — provável falha de API (WAF/quota). "
+            "Abortando p/ não gravar motoristas vazio."
+        )
+    IGNORAR = ("Company Group", "Entire Organization", "Grupo da empresa")
+    rows = []
+    for u in users:
+        cg     = u.get("companyGroups") or []
+        gids   = [x.get("id") if isinstance(x, dict) else x for x in cg]
+        gnomes = [grupos.get(gid, gid) for gid in gids if gid]
+        def _por_prefixo(pref):
+            return next((n for n in gnomes if n.startswith(pref)), "")
+        lotacao = _por_prefixo("ULOT_")
+        if not lotacao:
+            uteis   = [n for n in gnomes if n and n not in IGNORAR]
+            lotacao = uteis[0] if uteis else ""
+        rows.append({
+            "id":               u.get("id", ""),
+            "nome":             u.get("name", ""),
+            "matricula":        u.get("employeeNo", ""),
+            "lotacao":          lotacao,
+            "regional":         _por_prefixo("REG_"),
+            "superintendencia": _por_prefixo("SUP_"),
+            "todos_grupos":     " | ".join(gnomes),
+            "atualizado_em":    agora_brt(),
+        })
+    df = pd.DataFrame(rows)
+    log.info(f"  → {len(df)} motoristas")
     return df
 
 
@@ -1896,6 +1949,11 @@ def main(modo=None):
         if modo in ("all", "cadastro"):
             df = extrair_cadastro(credentials)
             gravar_tabela(df, "tb_cadastro", engine, chave_upsert="id")
+            del df
+            gc.collect()
+            # Dimensão de motoristas (lotação) — mesma fonte de grupos do cadastro.
+            df = extrair_motoristas(credentials)
+            gravar_tabela(df, "tb_motoristas", engine, chave_upsert="id")
             del df
             gc.collect()
 

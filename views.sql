@@ -240,6 +240,9 @@ WITH (security_invoker = on) AS
  )
  SELECT vm.motorista_nome,
         vm.motorista_matricula,
+        m.lotacao,
+        m.regional,
+        m.superintendencia,
         vm.qtd_veiculos,
         vm.veiculos,
         vm.viagens,
@@ -260,5 +263,6 @@ WITH (security_invoker = on) AS
           ) / 4.0, 1) ELSE NULL END AS score_seguranca
    FROM viagens_mot vm
    LEFT JOIN eventos_mot em ON em.motorista_id = vm.motorista_id
+   LEFT JOIN tb_motoristas m ON m.id = vm.motorista_id
   ORDER BY score_seguranca ASC NULLS LAST;
 
