@@ -26,6 +26,7 @@
 - `tb_comportamento` — janela móvel de 6 meses (contadores `*_6m`); incremental via buckets
 - `tb_comportamento_eventos` — buckets diários device/dia/tipo; mantém só os últimos 6 meses (limpeza automática)
 - `tb_viagens` — JANELA MÓVEL DE 30 DIAS (`VIAGENS_DIAS=30`, fixado no free tier). `sincronizar_viagens` PODA (`DELETE data_partida < data_inicio`) quando `VIAGENS_DIAS>0` — sem isso o upsert nunca apaga e reenche o disco.
+- VIAGENS INCREMENTAL (2026-06-18): no modo ano-corrente (`VIAGENS_DIAS=0`, atual no local) a sync NÃO rebaixa mais a janela p/ 1º/jan todo dia (re-buscava o ano inteiro, ~70 lotes/~1h30). `VIAGENS_INCREMENTAL=1` (default) + `_ultima_partida_gravada()` começam a janela em `max(data_partida) − VIAGENS_MARGEM_DIAS` (default 3d, cobre viagens em curso/revisadas; upsert por id não duplica). Vazio → cai p/ 1º/jan (primeira carga). Log mostra `[incremental ...]` / `[ano corrente]`. Nº de lotes (71) NÃO muda (é por device, 25/lote); o que cai é o volume/geocode por lote. Poda segue só com VIAGENS_DIAS>0 (incremental mantém o ano todo).
 - GEOCODE por LOOKUP (2026-06-15): endereços ficam em `tb_enderecos` (coord arredondada→endereço), NÃO em tb_viagens. `vw_relatorio_viagens` traz `end_partida`/`end_chegada` por JOIN em `round(lat/lon, 3)`. `geocodificar_enderecos()` (chamada no fim de sincronizar_viagens se VIAGENS_GEOCODE on) é incremental: só geocodifica coords novas. `GEOCODE_CASAS=3` (~110m) dedup ~1,4M→83k coords (geocode trip-a-trip era inviável, dias). IMPORTANTE: o `round(...,3)` da view tem que casar com GEOCODE_CASAS.
 - tb_viagens ENXUTA (2026-06-15): removidas serial/placa/veiculo/grupo/todos_grupos/regional/superintendencia (~190 MB de texto repetido). placa/veiculo/grupo/todos_grupos agora vêm de tb_cadastro via JOIN (por device_id) nas views *_viagens; regional/superintendencia eram peso morto (nenhuma view usava). Resultado: banco 484→259 MB, tb_viagens 429→204 MB, ~241 MB de folga. 0 viagens órfãs (todo device casa com tb_cadastro). 709.767 viagens / 30 dias.
 
@@ -52,6 +53,9 @@
 - Views filtram grupos OPE_*/terceiros via `todos_grupos NOT LIKE`
 
 ## Gotchas / armadilhas
+- POSTGRES CAI com 0xC000013A se FECHAREM A JANELA que o hospeda (2026-06-18; recorrente). Causa = STATUS_CONTROL_C_EXIT: fechar o terminal/console manda CTRL_CLOSE ao postmaster (que está pendurado nesse console) → "desligamento rápido". Derrubou a sync no meio (viagens → "connection refused localhost:5432"). Diagnóstico em `C:\Users\ygor.kouzak\pgdata\server.log`. Religar manual: `pg_ctl -D C:\Users\ygor.kouzak\pgdata -l ...\server.log start`.
+- NÃO dá pra rodar o PG sem console nesta máquina: WSH/wscript BLOQUEADO (testado, .vbs não dispara) e `Start-Process -WindowStyle Hidden` BLOQUEADO ("operação cancelada"); serviço do Windows exige admin (GPO). Por isso a defesa é na SYNC, não no launcher.
+- MITIGAÇÃO (2026-06-18): `atualizar_local.py` agora AUTO-CURA — `garantir_postgres()` (socket check 127.0.0.1:5432 + `pg_ctl start` + espera) roda ANTES da sync e DE NOVO se uma fase falhar, repetindo a fase 1×. Caminhos por env: `PG_CTL`/`PGDATA`/`PG_HOST`/`PG_PORT`. Validado ao vivo (porta fechada→religou). Regra p/ o usuário: nunca subir o banco por um terminal que vai fechar; deixar o logon (iniciar_postgres.bat no Startup) cuidar. Mesmo que feche e o PG morra, a próxima sync religa.
 - 403 não-JSON na autenticação Geotab = bloqueio WAF (IP do Render), não credencial
 - Quota Geotab: 5000 sub-chamadas/min — throttle proativo em 4500
 - Fuso na busca de eventos: BRT rotulado como UTC "vaza" ~3h p/ dia anterior (floor_dia descarta)
@@ -90,6 +94,9 @@
 - FEITO (usuário, 2026-06-17): On-premises Data Gateway configurado + dataset Power BI repontado p/ localhost; serviço do Render deletado. Inspeção via DBeaver (localhost:5432/geotab/postgres).
 
 ## Última sessão
+- Data: 2026-06-18
+- Resumo: Implementado modo INCREMENTAL nas viagens (`VIAGENS_INCREMENTAL`/`VIAGENS_MARGEM_DIAS` + `_ultima_partida_gravada`) — ver seção tb_viagens. VALIDADO ao vivo: janela caiu p/ 3 dias, 100k viagens (vs ~700k) e geocode 226 coords; fase viagens ~7min (vs ~1h30). A sync das 08h FALHOU (Postgres caiu às 08:21, ver gotcha abaixo) — religuei o banco e re-rodei o orquestrador OK (marcador 2026-06-18 gravado).
+- Tratada a fragilidade do Postgres a fechamento de janela (0xC000013A): auto-cura no orquestrador (ver gotcha). WSH e janela-oculta confirmados bloqueados pelo ambiente; serviço exige admin. Startup voltou ao iniciar_postgres.bat.
 - Data: 2026-06-17 (migração concluída; antes: 2026-06-15)
 - Resumo: Banco recuperado (suspenso no fim de semana + reiniciado hoje). Diagnosticado o "rodei /run/cadastro e não atualizou": no momento da chamada o comportamento segurava o `_lock`, a thread do cadastro foi descartada, mas `/run` respondia "iniciado" falso (sem registrar erro). Correções aplicadas:
   - `app.py`: `executar_sync` → `_disparar` (adquire lock e passa p/ thread) + `_executar_com_lock` (captura BaseException). `/run/<modo>` agora responde 409 "ocupado" quando o lock está tomado.

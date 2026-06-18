@@ -1227,6 +1227,16 @@ def sincronizar_comportamento(credentials, engine):
 # ex. VIAGENS_DIAS=2). VIAGENS_DIAS=0 (padrão) → ano corrente.
 VIAGENS_DIAS = int(os.environ.get("VIAGENS_DIAS", 0))
 
+# INCREMENTAL (só vale no modo ano-corrente, VIAGENS_DIAS=0): em vez de rebaixar a
+# janela sempre p/ 1º/jan e re-buscar o ano inteiro todo dia (~70 lotes), começa
+# da última viagem já gravada menos uma margem de segurança. A margem cobre viagens
+# que ainda estavam em curso (sem data_chegada final) ou que foram revisadas na
+# rodada anterior — elas são re-buscadas e re-upsertadas (sem duplicar, chave=id).
+# Se tb_viagens estiver vazia, cai automaticamente p/ 1º/jan (primeira carga).
+# VIAGENS_INCREMENTAL=0 força a recarga total do ano corrente.
+VIAGENS_INCREMENTAL = os.environ.get("VIAGENS_INCREMENTAL", "1") not in ("0", "false", "False", "")
+VIAGENS_MARGEM_DIAS = int(os.environ.get("VIAGENS_MARGEM_DIAS", 3))
+
 # Reverse geocode (GetAddresses) dobra o volume de chamadas e é o trecho mais
 # lento. Desligue na primeira carga com VIAGENS_GEOCODE=0 e ligue depois.
 VIAGENS_GEOCODE = os.environ.get("VIAGENS_GEOCODE", "1") not in ("0", "false", "False", "")
@@ -1484,6 +1494,17 @@ def _montar_viagem_row(v, did, info_motoristas, odo_anterior, coord_anterior):
     return row, lat_p, lon_p, lat_c, lon_c, odo_anterior, novo_coord_anterior
 
 
+def _ultima_partida_gravada(engine):
+    """Retorna o maior data_partida já gravado em tb_viagens (ou None se vazia).
+    Base do modo incremental — janela começa daqui menos a margem de segurança."""
+    try:
+        with engine.connect() as conn:
+            return conn.execute(text("SELECT max(data_partida) FROM tb_viagens")).scalar()
+    except Exception as e:
+        log.warning(f"  • Não consegui ler a última viagem gravada ({e}); usando carga do ano.")
+        return None
+
+
 def sincronizar_viagens(credentials, engine):
     """Extrai e grava viagens (Trips) dos últimos VIAGENS_DIAS dias em LOTES de
     dispositivos. Cada lote é buscado, geocodificado, gravado (upsert por id) e
@@ -1509,16 +1530,31 @@ def sincronizar_viagens(credentials, engine):
     del veiculos
 
     data_fim = agora_brt()
+    modo_janela = "ano corrente"
     if VIAGENS_DIAS > 0:
         data_inicio = data_fim - timedelta(days=VIAGENS_DIAS)
+        modo_janela = f"janela móvel {VIAGENS_DIAS}d"
     else:
         # Ano corrente: de 1º de janeiro às 00:00 até agora.
         data_inicio = data_fim.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        # INCREMENTAL: se já há viagens gravadas, sobe o início p/ a última partida
+        # gravada menos a margem — assim só re-buscamos o trecho recente em vez do
+        # ano inteiro. Vazio → mantém 1º/jan (primeira carga).
+        if VIAGENS_INCREMENTAL:
+            ultima = _ultima_partida_gravada(engine)
+            if ultima is not None:
+                desde = ultima - timedelta(days=VIAGENS_MARGEM_DIAS)
+                if desde > data_inicio:
+                    data_inicio = desde
+                    modo_janela = (
+                        f"incremental (última partida {ultima:%Y-%m-%d %H:%M} "
+                        f"− {VIAGENS_MARGEM_DIAS}d de margem)"
+                    )
     # Piso global: nunca antes de 2026 (a poda DELETE data_partida < data_inicio
     # então remove o que ficou de 2025).
     if data_inicio < DATA_CORTE:
         data_inicio = DATA_CORTE
-    log.info(f"  • Janela: {data_inicio:%Y-%m-%d %H:%M} → {data_fim:%Y-%m-%d %H:%M}")
+    log.info(f"  • Janela: {data_inicio:%Y-%m-%d %H:%M} → {data_fim:%Y-%m-%d %H:%M}  [{modo_janela}]")
 
     total_lotes    = (len(lista_ids) + VIAGENS_DEVICE_LOTE - 1) // VIAGENS_DEVICE_LOTE
     total_gravadas = 0
