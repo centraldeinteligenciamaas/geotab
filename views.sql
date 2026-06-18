@@ -156,14 +156,18 @@ WITH (security_invoker = on) AS
           c.placa, c.grupo AS uo_lotacao, c.todos_grupos,
           (LEAST((date_trunc('month', make_date(r.ano, r.mes, 1)) + interval '1 month' - interval '1 day')::date, CURRENT_DATE)
             - date_trunc('month', make_date(r.ano, r.mes, 1))::date + 1) AS dias_no_periodo
-     FROM tb_resumo_mensal r JOIN vw_cadastro c ON c.id = r.device_id)
+     FROM tb_resumo_mensal r JOIN vw_cadastro c ON c.id = r.device_id
+    -- Ignora meses que ainda não começaram (linha de mês futuro daria dias_no_periodo
+    -- ≤ 0 e taxa > 100%; pode surgir de data_partida vazada p/ o mês seguinte).
+    WHERE make_date(r.ano, r.mes, 1) <= CURRENT_DATE)
  SELECT placa, uo_lotacao, todos_grupos, ano, mes,
         to_char(make_date(ano, mes, 1), 'YYYY-MM') AS ano_mes,
         dias_no_periodo, dias_utilizados,
         round(km::numeric, 1) AS km_rodado,
         round((km / NULLIF(dias_utilizados,0))::numeric, 1) AS media_km_dia,
         round((duracao_segundos/3600.0)::numeric, 1) AS tempo_movimento_h,
-        round(dias_utilizados::numeric / NULLIF(dias_no_periodo,0) * 100, 0) AS taxa_utilizacao_pct,
+        -- LEAST blinda contra dias_utilizados > dias_no_periodo (taxa nunca passa de 100).
+        round(LEAST(dias_utilizados, dias_no_periodo)::numeric / NULLIF(dias_no_periodo,0) * 100, 0) AS taxa_utilizacao_pct,
         viagens
    FROM base
   ORDER BY placa, ano, mes;
@@ -178,14 +182,16 @@ WITH (security_invoker = on) AS
           c.grupo AS uo_lotacao, c.todos_grupos,
           (LEAST((date_trunc('month', make_date(r.ano, r.mes, 1)) + interval '1 month' - interval '1 day')::date, CURRENT_DATE)
             - date_trunc('month', make_date(r.ano, r.mes, 1))::date + 1) AS dias_no_periodo
-     FROM tb_resumo_mensal r JOIN vw_cadastro c ON c.id = r.device_id)
+     FROM tb_resumo_mensal r JOIN vw_cadastro c ON c.id = r.device_id
+    -- Ignora meses que ainda não começaram (ver vw_resumo_frota_mensal).
+    WHERE make_date(r.ano, r.mes, 1) <= CURRENT_DATE)
  SELECT uo_lotacao, todos_grupos, ano, mes,
         to_char(make_date(ano, mes, 1), 'YYYY-MM') AS ano_mes,
         count(*) AS qtd_veiculos,
         round(sum(km)::numeric, 0) AS km_total,
         round((sum(km) / NULLIF(count(*),0))::numeric, 0) AS media_km_veiculo,
         round((sum(duracao_segundos)/3600.0)::numeric, 0) AS tempo_movimento_h,
-        round(avg(dias_utilizados::numeric / NULLIF(dias_no_periodo,0) * 100), 0) AS taxa_media_utilizacao_pct
+        round(avg(LEAST(dias_utilizados, dias_no_periodo)::numeric / NULLIF(dias_no_periodo,0) * 100), 0) AS taxa_media_utilizacao_pct
    FROM base
   GROUP BY uo_lotacao, todos_grupos, ano, mes
   ORDER BY todos_grupos, ano, mes;

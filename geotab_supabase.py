@@ -1862,6 +1862,7 @@ def atualizar_resumo_mes_corrente(engine):
                        :agora
                   FROM tb_viagens
                  WHERE data_partida >= date_trunc('month', CURRENT_DATE)
+                   AND data_partida <  date_trunc('month', CURRENT_DATE) + interval '1 month'
                  GROUP BY device_id,
                        EXTRACT(year FROM data_partida),
                        EXTRACT(month FROM data_partida)

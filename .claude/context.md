@@ -48,6 +48,10 @@
 - `tb_resumo_mensal` — agregado km/tempo/dias/viagens por device×mês (~21k linhas/ano). Mês corrente: atualizado no sync de viagens via `atualizar_resumo_mes_corrente` (SQL de tb_viagens, sem Geotab). Meses passados: `backfill_resumo_mensal` (Geotab, uma vez). placa/grupo via JOIN tb_cadastro nas views.
 - NOTA: as views VIVAS já estavam em 30 dias; o `views.sql` estava DESATUALIZADO (dizia "ano corrente"). Arquivo sincronizado com o banco em 2026-06-15. Sempre conferir com `pg_get_viewdef` antes de assumir o que o arquivo diz.
 
+## Taxa de utilização > 100% / dias_utilizados > dias_no_periodo (corrigido 2026-06-18)
+- CAUSA: `dias_no_periodo` é calculado AO VIVO na view (`LEAST(fim_mes, CURRENT_DATE) - ini_mes + 1`). Linha de tb_resumo_mensal p/ um MÊS FUTURO (relativo a hoje) → dias_no_periodo ≤ 0 com dias_utilizados ≥ 1 → taxa > 100. Mês futuro surgia porque `atualizar_resumo_mes_corrente` só tinha limite INFERIOR (`data_partida >= ini do mês`); viagem com data vazada p/ o mês seguinte criava a linha. Intermitente (some quando os dados são reescritos).
+- FIX: (1) código — `atualizar_resumo_mes_corrente` ganhou limite SUPERIOR (`AND data_partida < ini_mes + 1 mês`), confinando ao mês corrente. (2) views `vw_resumo_frota_mensal` e `vw_indicadores_mensal` — `WHERE make_date(ano,mes,1) <= CURRENT_DATE` (ignora meses não iniciados) + taxa com `LEAST(dias_utilizados, dias_no_periodo)` (nunca passa de 100). Power BI: dar refresh p/ limpar valores cacheados.
+
 ## Decisões importantes
 - TIMESTAMP sem timezone, valores em BRT (Brasil sem horário de verão desde 2019)
 - NullPool + pooler transaction mode → evita "max clients reached"
