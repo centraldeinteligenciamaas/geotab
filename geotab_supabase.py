@@ -183,6 +183,8 @@ def criar_tabelas(engine):
             data_partida        TIMESTAMP,
             data_chegada        TIMESTAMP,
             duracao_segundos    INTEGER,
+            tempo_ocioso_segundos    INTEGER,   -- idlingDuration: parado c/ motor ligado
+            duracao_parada_segundos  INTEGER,   -- stopDuration: tempo parado no destino
             distancia_km        DOUBLE PRECISION,
             hodometro_inicial   DOUBLE PRECISION,
             hodometro_final     DOUBLE PRECISION,
@@ -215,6 +217,24 @@ def criar_tabelas(engine):
             PRIMARY KEY (device_id, dia, tipo)
         );
         CREATE INDEX IF NOT EXISTS ix_comp_eventos_dia ON tb_comportamento_eventos (dia);
+
+        -- Buckets diários de eventos POR MOTORISTA (1 linha por motorista/device/dia/tipo).
+        -- Mesmos eventos de tb_comportamento_eventos, mas atribuídos ao motorista que
+        -- conduzia (campo 'driver' do ExceptionEvent). device_id é a CHAVE de ligação
+        -- com tb_comportamento_eventos: casa em (device_id, dia, tipo). Só eventos com
+        -- motorista identificado entram aqui (NoDriver/UnknownDriver são descartados),
+        -- então sum(qtd) por (device,dia,tipo) aqui ≤ a qtd do bucket por veículo.
+        CREATE TABLE IF NOT EXISTS tb_comportamento_motorista (
+            motorista_id  TEXT,
+            device_id     TEXT,
+            dia           DATE,
+            tipo          TEXT,
+            qtd           INTEGER,
+            ultimo_ts     TIMESTAMP,
+            PRIMARY KEY (motorista_id, device_id, dia, tipo)
+        );
+        CREATE INDEX IF NOT EXISTS ix_comp_mot_dia ON tb_comportamento_motorista (dia);
+        CREATE INDEX IF NOT EXISTS ix_comp_mot_mot ON tb_comportamento_motorista (motorista_id);
 
         -- Cache de geocodificação (coord arredondada → endereço). As views de
         -- viagens trazem o endereço por JOIN, evitando guardar texto de endereço
@@ -309,6 +329,11 @@ def criar_tabelas(engine):
             DROP COLUMN IF EXISTS todos_grupos,
             DROP COLUMN IF EXISTS regional,
             DROP COLUMN IF EXISTS superintendencia;
+        -- Tempo parado c/ motor ligado (idlingDuration) e duração da parada
+        -- (stopDuration) — 2026-06-18. Só preenchidas em viagens (re)sincronizadas.
+        ALTER TABLE tb_viagens
+            ADD COLUMN IF NOT EXISTS tempo_ocioso_segundos   INTEGER,
+            ADD COLUMN IF NOT EXISTS duracao_parada_segundos INTEGER;
         -- tb_comportamento (agregado 6m) REMOVIDA (2026-06-16): vw_comportamento virou
         -- diária (buckets) e o odômetro foi p/ tb_odometro_dia. Drop idempotente.
         DROP TABLE IF EXISTS tb_comportamento;
@@ -1074,6 +1099,47 @@ def _limpar_buckets_antigos(engine, limite_dia):
     log.info(f"  ✓ {apagados} buckets fora da janela (dia < {limite_dia}) removidos.")
 
 
+def _upsert_buckets_motorista(engine, buckets_mot):
+    """Grava/atualiza os buckets por motorista {(mid, did, dia, tipo): {qtd, ultimo_ts}}.
+    Mesma lógica de _upsert_buckets: o dia é recontado por inteiro, então o
+    ON CONFLICT sobrescreve a contagem."""
+    if not buckets_mot:
+        log.info("  • Nenhum bucket de evento por motorista.")
+        return
+    df = pd.DataFrame([
+        {"motorista_id": mid, "device_id": did, "dia": dia, "tipo": tipo,
+         "qtd": v["qtd"], "ultimo_ts": v["ultimo_ts"]}
+        for (mid, did, dia, tipo), v in buckets_mot.items()
+    ])
+
+    def _exec():
+        with engine.begin() as conn:
+            df.to_sql("tmp_comp_mot", conn, if_exists="replace", index=False, chunksize=5000)
+            conn.execute(text("""
+                INSERT INTO tb_comportamento_motorista (motorista_id, device_id, dia, tipo, qtd, ultimo_ts)
+                SELECT motorista_id, device_id, dia::date, tipo, qtd, ultimo_ts FROM tmp_comp_mot
+                ON CONFLICT (motorista_id, device_id, dia, tipo)
+                DO UPDATE SET qtd = EXCLUDED.qtd, ultimo_ts = EXCLUDED.ultimo_ts
+            """))
+            conn.execute(text("DROP TABLE IF EXISTS tmp_comp_mot"))
+
+    _com_retry(_exec)
+    log.info(f"  ✓ {len(df)} buckets (motorista/device/dia/tipo) gravados.")
+
+
+def _limpar_buckets_motorista_antigos(engine, limite_dia):
+    """Mantém a janela móvel de 6 meses em tb_comportamento_motorista."""
+    def _exec():
+        with engine.begin() as conn:
+            r = conn.execute(
+                text("DELETE FROM tb_comportamento_motorista WHERE dia < CAST(:lim AS date)"),
+                {"lim": limite_dia},
+            )
+            return r.rowcount
+    apagados = _com_retry(_exec)
+    log.info(f"  ✓ {apagados} buckets/motorista fora da janela (dia < {limite_dia}) removidos.")
+
+
 def sincronizar_comportamento(credentials, engine):
     """Sincroniza o comportamento (janela móvel de 6 meses) de forma incremental.
 
@@ -1098,11 +1164,15 @@ def sincronizar_comportamento(credentials, engine):
     janela_ini     = max(_meses_atras(data_fim, 6), DATA_CORTE)
     janela_ini_str = janela_ini.strftime("%Y-%m-%d")
 
+    # COMPORTAMENTO_BACKFILL=1 força a recontagem dos 6 meses (re-upsert idempotente
+    # dos buckets por veículo + preenche tb_comportamento_motorista no histórico).
+    forcar_backfill = os.environ.get("COMPORTAMENTO_BACKFILL", "0") not in ("0", "false", "False", "")
     ultimo_dia = _ler_ultimo_dia_buckets(engine)
-    if ultimo_dia is None:
+    if ultimo_dia is None or forcar_backfill:
         backfill = True
         desde    = janela_ini
-        log.info(f"  • BACKFILL (carga única): {janela_ini:%Y-%m-%d} → {data_fim:%Y-%m-%d}")
+        motivo   = "carga única" if ultimo_dia is None else "forçado por COMPORTAMENTO_BACKFILL"
+        log.info(f"  • BACKFILL ({motivo}): {janela_ini:%Y-%m-%d} → {data_fim:%Y-%m-%d}")
     else:
         backfill = False
         # Reconta desde 00:00 do último dia gravado (pode ter ficado parcial),
@@ -1120,7 +1190,11 @@ def sincronizar_comportamento(credentials, engine):
     floor_dia = desde.strftime("%Y-%m-%d")
 
     # ── Conta eventos em buckets diários {(did, 'YYYY-MM-DD', tipo): {qtd, ultimo_ts}} ──
+    # buckets      = por VEÍCULO (device/dia/tipo) → tb_comportamento_eventos
+    # buckets_mot  = por MOTORISTA (motorista/device/dia/tipo) → tb_comportamento_motorista
+    #                (só eventos com driver identificado; base do score por motorista)
     buckets = {}
+    buckets_mot = {}
 
     def processar(eventos, tipo):
         contados, ignorados = 0, 0
@@ -1147,6 +1221,19 @@ def sincronizar_comportamento(credentials, engine):
                 b["qtd"] += 1
                 if ts > b["ultimo_ts"]:
                     b["ultimo_ts"] = ts
+            # Atribuição por motorista (campo driver do evento). Só quando há motorista
+            # identificado — NoDriver/UnknownDriver ficam de fora do score.
+            drv = ev.get("driver")
+            drv_id = drv.get("id") if isinstance(drv, dict) else (drv if isinstance(drv, str) else None)
+            if drv_id and drv_id not in ("NoDriver", "UnknownDriverId"):
+                km = (drv_id, did, dia, tipo)
+                bm = buckets_mot.get(km)
+                if bm is None:
+                    buckets_mot[km] = {"qtd": 1, "ultimo_ts": ts}
+                else:
+                    bm["qtd"] += 1
+                    if ts > bm["ultimo_ts"]:
+                        bm["ultimo_ts"] = ts
             contados += 1
         return contados, ignorados
 
@@ -1211,6 +1298,12 @@ def sincronizar_comportamento(credentials, engine):
     del buckets
     gc.collect()
     _limpar_buckets_antigos(engine, janela_ini_str)
+
+    # ── Buckets por MOTORISTA (mesmos eventos, atribuídos ao driver) ──
+    _upsert_buckets_motorista(engine, buckets_mot)
+    del buckets_mot
+    gc.collect()
+    _limpar_buckets_motorista_antigos(engine, janela_ini_str)
 
     # ── Odômetro POR DIA → tb_odometro_dia (exposto na vw_comportamento por JOIN) ──
     # backfill = mesma janela de 6 meses dos buckets; incremental = só os dias novos
@@ -1474,6 +1567,8 @@ def _montar_viagem_row(v, did, info_motoristas, odo_anterior, coord_anterior):
         "data_partida":        ts_brt(start),
         "data_chegada":        ts_brt(stop),
         "duracao_segundos":    _duracao_para_segundos(v.get("drivingDuration")),
+        "tempo_ocioso_segundos":   _duracao_para_segundos(v.get("idlingDuration")),
+        "duracao_parada_segundos": _duracao_para_segundos(v.get("stopDuration")),
         "distancia_km":        dist,
         "hodometro_inicial":   odo_inicial,
         "hodometro_final":     odo_final,
