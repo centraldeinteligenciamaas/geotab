@@ -281,6 +281,7 @@ def criar_tabelas(engine):
         CREATE TABLE IF NOT EXISTS tb_motoristas (
             id             TEXT PRIMARY KEY,
             nome           TEXT,
+            nome_completo  TEXT,
             matricula      TEXT,
             lotacao        TEXT,
             regional       TEXT,
@@ -350,6 +351,10 @@ def criar_tabelas(engine):
         -- tb_comportamento (agregado 6m) REMOVIDA (2026-06-16): vw_comportamento virou
         -- diária (buckets) e o odômetro foi p/ tb_odometro_dia. Drop idempotente.
         DROP TABLE IF EXISTS tb_comportamento;
+        -- Nome próprio do motorista (User.firstName da Geotab) — 2026-06-19. O campo
+        -- `nome` guarda o login/e-mail (User.name); este traz o nome de pessoa.
+        ALTER TABLE tb_motoristas
+            ADD COLUMN IF NOT EXISTS nome_completo TEXT;
     """
     def _executar():
         with engine.begin() as conn:
@@ -746,6 +751,7 @@ def extrair_motoristas(credentials):
         rows.append({
             "id":               u.get("id", ""),
             "nome":             u.get("name", ""),
+            "nome_completo":    (u.get("firstName") or "").strip(),
             "matricula":        u.get("employeeNo", ""),
             "lotacao":          lotacao,
             "regional":         _por_prefixo("REG_"),

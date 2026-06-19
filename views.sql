@@ -238,11 +238,13 @@ WITH (security_invoker = on) AS
      FROM tb_comportamento_motorista
     GROUP BY motorista_id, dia
  )
- SELECT m.nome       AS motorista_nome,
-        m.matricula  AS motorista_matricula,
+ SELECT m.nome          AS motorista_nome,
+        m.nome_completo AS motorista_nome_completo,
+        m.matricula     AS motorista_matricula,
         m.lotacao,
         m.regional,
         m.superintendencia,
+        m.todos_grupos,
         COALESCE(vd.dia, ed.dia)                          AS data,
         EXTRACT(year  FROM COALESCE(vd.dia, ed.dia))::int AS ano,
         EXTRACT(month FROM COALESCE(vd.dia, ed.dia))::int AS mes,
@@ -305,10 +307,12 @@ WITH (security_invoker = on) AS
     GROUP BY motorista_id
  )
  SELECT vm.motorista_nome,
+        m.nome_completo AS motorista_nome_completo,
         vm.motorista_matricula,
         m.lotacao,
         m.regional,
         m.superintendencia,
+        m.todos_grupos,
         vm.qtd_veiculos,
         vm.veiculos,
         vm.viagens,
