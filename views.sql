@@ -153,14 +153,14 @@ CREATE OR REPLACE VIEW vw_resumo_frota_mensal
 WITH (security_invoker = on) AS
  WITH base AS (
    SELECT r.device_id, r.ano, r.mes, r.km, r.duracao_segundos, r.dias_utilizados, r.viagens,
-          c.placa, c.grupo AS uo_lotacao, c.todos_grupos,
+          c.placa, c.marca, c.modelo, c.grupo AS uo_lotacao, c.todos_grupos,
           (LEAST((date_trunc('month', make_date(r.ano, r.mes, 1)) + interval '1 month' - interval '1 day')::date, CURRENT_DATE)
             - date_trunc('month', make_date(r.ano, r.mes, 1))::date + 1) AS dias_no_periodo
      FROM tb_resumo_mensal r JOIN vw_cadastro c ON c.id = r.device_id
     -- Ignora meses que ainda não começaram (linha de mês futuro daria dias_no_periodo
     -- ≤ 0 e taxa > 100%; pode surgir de data_partida vazada p/ o mês seguinte).
     WHERE make_date(r.ano, r.mes, 1) <= CURRENT_DATE)
- SELECT placa, uo_lotacao, todos_grupos, ano, mes,
+ SELECT placa, marca, modelo, uo_lotacao, todos_grupos, ano, mes,
         to_char(make_date(ano, mes, 1), 'YYYY-MM') AS ano_mes,
         dias_no_periodo, dias_utilizados,
         round(km::numeric, 1) AS km_rodado,

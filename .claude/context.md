@@ -42,7 +42,7 @@
 - `vw_relatorio_viagens` — últimos 30 dias, por viagem (`data_partida`, `data_chegada`)
 - `tb_motoristas` (2026-06-18) — dimensão de motoristas (entidade User). `lotacao` (grupo ULOT_), `regional` (REG_), `superintendencia` (SUP_), `todos_grupos`. Populada no modo `cadastro` (`extrair_motoristas`, mesma fonte de Group do cadastro). 3.629 motoristas; companyGroups vem 100% preenchido.
 - `vw_motoristas` (2026-06-18) — POR DIA (motorista × `data`), espelha vw_comportamento; BI agrega no período. Cols: motorista_nome/matricula, `lotacao`/`regional`/`superintendencia` (JOIN tb_motoristas), data/ano/mes, qtd_veiculos, `veiculos` (string_agg placas), viagens, km, horas movimento/ocioso/parado, contadores de eventos e `score_risco` (ponderado: excesso×3+acel×2+fren×2+curva×1, igual vw_comportamento). FULL JOIN viagens_dia × eventos_dia (não perde dia). Janelas alinhadas (ambas ano/DATA_CORTE). O score 0-100 estilo Geotab (Event Count: `100 - SUM(total_eventos)*1000/SUM(km)`, piso de km a gosto) vira MEDIDA no BI sobre o período — por dia não faz sentido (km baixo). Era anual c/ score_seguranca 0-100 até virar diária em 2026-06-18.
-- `vw_resumo_frota_mensal` — por veículo×mês, ano 2026 (`ano`, `mes`, `ano_mes`)
+- `vw_resumo_frota_mensal` — por veículo×mês, ano 2026 (`ano`, `mes`, `ano_mes`). Cols `marca`+`modelo` (de tb_cadastro via JOIN) add 2026-06-19, logo após `placa`. Recriada com DROP+CREATE (CREATE OR REPLACE não aceita coluna no meio da lista). NOTA: a view NÃO expõe device_id (PK real = tb_cadastro.id); 152 equipamentos sem placa ficam indistinguíveis no BI.
 - `vw_indicadores_mensal` — por grupo×mês, ano 2026 (`ano`, `mes`, `ano_mes`)
 - REMOVIDAS (2026-06-16): views `vw_comportamento_mensal`/`vw_resumo_frota`/`vw_indicadores_produtividade` (1 view por tema) e a TABELA `tb_comportamento` (dropada). vw_comportamento usa os buckets; odômetro migrou p/ tb_odometro_dia.
 - `tb_odometro_dia` — odômetro POR DIA (device×dia, último valor do dia, físico+GPS). Preenchido por `sincronizar_odometro_dia` (chamado no fim de sincronizar_comportamento; incremental = dias novos). Substitui o odômetro que vivia em tb_comportamento. Funções antigas buscar_odo_gps/fisico/_com_fallback_ano/_reconstruir/_ler_odo_anterior TODAS removidas (limpeza 2026-06-17).
@@ -102,6 +102,8 @@
 - FEITO (usuário, 2026-06-17): On-premises Data Gateway configurado + dataset Power BI repontado p/ localhost; serviço do Render deletado. Inspeção via DBeaver (localhost:5432/geotab/postgres).
 
 ## Última sessão
+- Data: 2026-06-19
+- Resumo: Sync diária de 19/jun rodou OK (4 fases, 135.656 viagens, marcador gravado). Adicionada coluna `modelo` à `vw_resumo_frota_mensal` (só nessa view, a pedido) — em views.sql e no banco local (DROP+CREATE p/ inserir a coluna após `placa`). vw_indicadores_mensal não mexida.
 - Data: 2026-06-18
 - Resumo: Implementado modo INCREMENTAL nas viagens (`VIAGENS_INCREMENTAL`/`VIAGENS_MARGEM_DIAS` + `_ultima_partida_gravada`) — ver seção tb_viagens. VALIDADO ao vivo: janela caiu p/ 3 dias, 100k viagens (vs ~700k) e geocode 226 coords; fase viagens ~7min (vs ~1h30). A sync das 08h FALHOU (Postgres caiu às 08:21, ver gotcha abaixo) — religuei o banco e re-rodei o orquestrador OK (marcador 2026-06-18 gravado).
 - Tratada a fragilidade do Postgres a fechamento de janela (0xC000013A): auto-cura no orquestrador (ver gotcha). WSH e janela-oculta confirmados bloqueados pelo ambiente; serviço exige admin. Startup voltou ao iniciar_postgres.bat.
