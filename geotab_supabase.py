@@ -205,9 +205,8 @@ def criar_tabelas(engine):
         CREATE INDEX IF NOT EXISTS ix_viagens_partida ON tb_viagens (data_partida);
 
         -- Buckets diários de eventos de comportamento (1 linha por device/dia/tipo).
-        -- Fonte incremental de tb_comportamento: contamos só os dias novos e somamos
-        -- os últimos 6 meses para reconstruir os contadores *_6m. A janela móvel é
-        -- mantida apagando buckets fora dos 6 meses.
+        -- Fonte da vw_comportamento (diária). Janela = ANO CORRENTE (DATA_CORTE),
+        -- ALINHADA com tb_viagens; buckets < DATA_CORTE são apagados (_limpar_buckets_antigos).
         CREATE TABLE IF NOT EXISTS tb_comportamento_eventos (
             device_id   TEXT,
             dia         DATE,
@@ -1139,8 +1138,8 @@ def _upsert_buckets(engine, buckets):
 
 
 def _limpar_buckets_antigos(engine, limite_dia):
-    """Apaga buckets anteriores a limite_dia ('YYYY-MM-DD') — mantém a janela móvel
-    de 6 meses e impede a tabela de crescer indefinidamente."""
+    """Apaga buckets anteriores a limite_dia ('YYYY-MM-DD') = DATA_CORTE — mantém a
+    janela do ano corrente e impede a tabela de crescer indefinidamente."""
     def _exec():
         with engine.begin() as conn:
             r = conn.execute(
@@ -1181,7 +1180,7 @@ def _upsert_buckets_motorista(engine, buckets_mot):
 
 
 def _limpar_buckets_motorista_antigos(engine, limite_dia):
-    """Mantém a janela móvel de 6 meses em tb_comportamento_motorista."""
+    """Mantém a janela do ano corrente (DATA_CORTE) em tb_comportamento_motorista."""
     def _exec():
         with engine.begin() as conn:
             r = conn.execute(
@@ -1194,15 +1193,16 @@ def _limpar_buckets_motorista_antigos(engine, limite_dia):
 
 
 def sincronizar_comportamento(credentials, engine):
-    """Sincroniza o comportamento (janela móvel de 6 meses) de forma incremental.
+    """Sincroniza o comportamento (ano corrente, desde DATA_CORTE) de forma incremental.
 
-    1ª execução (tb_comportamento_eventos vazia) = BACKFILL: conta os 6 meses
-    inteiros. Execuções seguintes = INCREMENTAL: recontam só do último dia já
+    Janela ALINHADA com tb_viagens (ambos cobrem o ano). 1ª execução
+    (tb_comportamento_eventos vazia) = BACKFILL: conta o ano inteiro. Execuções
+    seguintes = INCREMENTAL: recontam só do último dia já
     gravado (que pode ter ficado parcial) até agora. Os eventos viram buckets
     diários (device/dia/tipo) — consumidos pela vw_comportamento (diária). O
     odômetro do dia vai p/ tb_odometro_dia. Buckets fora da janela são apagados.
     serial/placa/grupos NÃO são gravados aqui — vêm de tb_cadastro na view."""
-    log.info("Sincronizando comportamento (6 meses, incremental por buckets diários)...")
+    log.info("Sincronizando comportamento (ano corrente, incremental por buckets diários)...")
 
     veiculos   = geotab_get(credentials, "Device")
     lista_ids  = [v.get("id") for v in veiculos]
@@ -1212,9 +1212,11 @@ def sincronizar_comportamento(credentials, engine):
     ids_velocidade, regras_simples = _identificar_regras(credentials)
 
     data_fim       = agora_brt()
-    # Janela de 6 meses, mas NUNCA antes do piso (somente 2026+). O
-    # _limpar_buckets_antigos(janela_ini_str) então remove o que ficou de 2025.
-    janela_ini     = max(_meses_atras(data_fim, 6), DATA_CORTE)
+    # Janela = ANO CORRENTE (DATA_CORTE, somente 2026+), ALINHADA com tb_viagens
+    # (que também acumula o ano todo). Antes eram 6 meses móveis, o que descasava do
+    # km das viagens no score por motorista a partir de ~julho. Agora ambos cobrem
+    # o ano. _limpar_buckets_antigos(janela_ini_str) remove o que ficou < DATA_CORTE.
+    janela_ini     = DATA_CORTE
     janela_ini_str = janela_ini.strftime("%Y-%m-%d")
 
     # COMPORTAMENTO_BACKFILL=1 força a recontagem dos 6 meses (re-upsert idempotente
