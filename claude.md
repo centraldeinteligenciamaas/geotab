@@ -39,6 +39,11 @@ Regra de ouro: o bootstrap é a única vez que você varre o projeto inteiro. De
    - Edite apenas o que mudou (estado atual, próximos passos, gotchas novos, data da última sessão).
    - Não regenere o arquivo do zero.
    - Mantenha-o curto (alvo: < 150 linhas).
+4. ATUALIZE TAMBÉM o `MANUAL.md` (documentação humana do projeto) quando a mudança afetar
+   o que ele documenta: novo arquivo, mudança de fluxo/operação, nova tabela/view, novo gotcha.
+   - Edição incremental na seção correspondente + a data de "Última atualização" no topo. Não regenere.
+   - Diferença de papéis: `.claude/context.md` = estado técnico enxuto p/ retomar a sessão (eu);
+     `MANUAL.md` = documentação completa e legível p/ pessoas (usuário/equipe).
 
 ---
 
