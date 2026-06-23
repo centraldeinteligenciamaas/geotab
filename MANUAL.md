@@ -214,12 +214,58 @@ Link do índice: `https://ldhelbygqrjqchistrgp.supabase.co/storage/v1/object/pub
 
 ---
 
-## 10. Problemas conhecidos (troubleshooting)
+## 10. Atualização agendada no Power BI (banco local via Gateway)
+
+O Power BI Service lê o banco **local** através do **On-premises Data Gateway** instalado nesta
+máquina. Para a atualização rodar sozinha, é preciso configurar uma vez a fonte de dados no
+gateway e o agendamento no dataset.
+
+### Pré-requisitos
+- **Gateway padrão** (standard, não "personal") instalado e online, rodando como **serviço do
+  Windows** e logado com a **mesma conta da organização** dona do dataset.
+- Driver **Npgsql** (PostgreSQL) instalado na máquina do gateway.
+- **Postgres local no ar** no momento do refresh (ver gotcha abaixo).
+
+### Passo a passo (uma vez)
+1. Power BI Service → ⚙ → **Gerenciar conexões e gateways** → **Nova conexão / fonte de dados**:
+   - **Cluster:** selecionar o gateway desta máquina (dropdown).
+   - **Nome da conexão:** `geotab-localhost` (rótulo livre).
+   - **Tipo:** PostgreSQL · **Servidor:** `localhost:5432` · **Banco:** `geotab`.
+   - **Autenticação:** Basic — usuário `postgres`, senha do banco (ver `psql_geotab.bat` / `.env`).
+   - **Nível de privacidade:** Organizational.
+   > O **Servidor** aqui tem que ser idêntico ao que está no Power Query do `.pbix` (`localhost`
+   > vs `127.0.0.1` importa) — senão dá "não foi possível encontrar a fonte no gateway".
+2. Dataset → **⋯ → Configurações → Conexão de gateway:** ativar e mapear para a fonte criada.
+3. Mesma tela → **Atualização agendada:** ligar, fuso **UTC-3 (Brasília)**, horário **10:00**,
+   e ativar notificação de falha por e-mail.
+
+### Por que 10:00
+A sync diária roda no logon e termina cedo (~08:20). 10:00 dá folga para banco + gateway
+estarem no ar. Limite do Pro: até 8 horários/dia.
+
+### Gotcha — o refresh falha se o banco estiver fora do ar
+A atualização agendada dispara num horário fixo e exige, naquele instante: **PC ligado e
+acordado**, **Postgres no ar** e **serviço do gateway rodando**.
+- Erro típico: `No connection could be made because the target machine actively refused it`
+  (status 400) = **o Postgres não estava no ar** na hora (porta 5432 sem listener).
+- A **auto-cura só roda durante a sync diária** — ela NÃO fica vigiando o banco o resto do dia.
+  Se o banco cair (janela fechada — gotcha `0xC000013A`, §8) e o Power BI tentar atualizar, falha
+  e nada religa o banco para o Power BI.
+- **Defesa:** não fechar a janela do Postgres; deixar o `iniciar_postgres.bat` do logon subir o
+  banco; manter o PC ligado/acordado às 10:00. Religar na mão se preciso:
+  `pg_ctl -D C:\Users\ygor.kouzak\pgdata start` e reexecutar o refresh.
+- Nos dias em que o PC fica desligado às 10:00, o refresh falha (limitação do banco ser local
+  nesta máquina) — não há solução sem mudar a fonte para um host sempre no ar.
+
+---
+
+## 11. Problemas conhecidos (troubleshooting)
 
 | Sintoma | Causa / Solução |
 |---|---|
 | Sync não rodou / dados parados | PC não foi ligado em dia útil, ou Postgres caiu. Conferir `atualizacao_local.log` e `server.log`. Religar: `pg_ctl -D C:\...\pgdata start`. |
 | `connection refused localhost:5432` | Postgres caiu (janela fechada — `0xC000013A`). A auto-cura religa na próxima fase/sync; ou religar na mão. |
+| Power BI: `target machine actively refused it` (400) | Postgres fora do ar na hora do refresh. Religar (`pg_ctl ... start`) e reexecutar. A auto-cura só roda na sync, não p/ o Power BI (ver §10). |
 | Export CSV pulado | Faltava `SUPABASE_SERVICE_KEY` no ambiente do orquestrador (corrigido com `load_dotenv` em 2026-06-23). Conferir a chave no `.env`. |
 | `403` não-JSON na auth Geotab | Bloqueio de WAF por IP (era o caso do Render). Local tem IP limpo. |
 | HTTP 400 ao subir CSV | Arquivo > 50 MB (free tier). O particionamento já cuida; conferir `ALVO_CSV`/`LIMITE_ARQUIVO`. |
@@ -228,7 +274,7 @@ Link do índice: `https://ldhelbygqrjqchistrgp.supabase.co/storage/v1/object/pub
 
 ---
 
-## 11. Decisões importantes (resumo)
+## 12. Decisões importantes (resumo)
 
 - **Local em vez de nuvem:** resolve IP bloqueado (WAF Geotab), limite de disco e custo.
 - **Timestamps sem timezone, em horário de Brasília** (Brasil sem horário de verão desde 2019).
@@ -241,7 +287,7 @@ Para o histórico detalhado por sessão e decisões com data, ver `.claude/conte
 
 ---
 
-## 12. Manutenção deste manual
+## 13. Manutenção deste manual
 
 Sempre que houver uma alteração relevante no projeto (novo arquivo, mudança de fluxo,
 nova tabela/view, mudança de operação, novo gotcha), **atualize a seção correspondente
