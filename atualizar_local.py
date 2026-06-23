@@ -19,7 +19,13 @@ import subprocess
 import datetime
 import pathlib
 
+from dotenv import load_dotenv
+
 BASE   = pathlib.Path(__file__).resolve().parent
+# Carrega o .env no orquestrador (os modos e o exportar_csv.py já fazem isso por
+# conta própria, mas o GUARD do export — if env.get("SUPABASE_SERVICE_KEY") — roda
+# AQUI; sem o load_dotenv a chave nunca aparece e o export é pulado por engano).
+load_dotenv(BASE / ".env")
 LOG    = BASE / "atualizacao_local.log"
 MARKER = BASE / ".ultima_atualizacao"          # guarda a data do último sucesso
 # Ordem leve → pesado. São as planilhas que mudam diariamente; cadastro/status são
@@ -97,6 +103,26 @@ def _rodar_modo(modo, fh, env):
     return rc == 0
 
 
+def _exportar_csv(fh, env):
+    """Exporta as views p/ CSV e sobe no Supabase Storage (links p/ clientes externos).
+    NÃO-FATAL: roda só após as 4 fases OK e nunca desmarca a sync se falhar. Pulado se
+    SUPABASE_SERVICE_KEY não estiver no ambiente (sem chave, não há p/ onde subir)."""
+    if not env.get("SUPABASE_SERVICE_KEY"):
+        stamp(fh, "  export CSV pulado (sem SUPABASE_SERVICE_KEY no .env).")
+        return
+    stamp(fh, "---- export CSV (Supabase Storage) ----")
+    try:
+        rc = subprocess.run(
+            [sys.executable, str(BASE / "exportar_csv.py")],
+            cwd=str(BASE), env=env,
+            stdout=fh, stderr=subprocess.STDOUT,
+            creationflags=NO_WINDOW,
+        ).returncode
+        stamp(fh, f"  {'OK' if rc == 0 else 'FALHOU (não-fatal)'} export CSV")
+    except Exception as exc:
+        stamp(fh, f"  exceção no export CSV (não-fatal): {exc}")
+
+
 def main():
     hoje = datetime.date.today()
     with open(LOG, "a", encoding="utf-8") as fh:
@@ -138,6 +164,8 @@ def main():
         else:
             MARKER.write_text(hoje.isoformat(), encoding="utf-8")
             stamp(fh, "================ Concluído (todos OK) ================")
+            # Snapshot do dia p/ download externo — depois da sync, nunca antes.
+            _exportar_csv(fh, env)
 
 
 if __name__ == "__main__":

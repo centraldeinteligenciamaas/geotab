@@ -14,7 +14,8 @@
 
 ## Arquitetura (mapa de arquivos)
 - `geotab_supabase.py` — extração da API Geotab (JSON-RPC) e gravação no Postgres; cria/migra tabelas; throttle de quota (4500 sub-chamadas/60s). Conexão lê `SUPABASE_*` do .env (agora apontam p/ localhost) + `SUPABASE_SSLMODE`.
-- `atualizar_local.py` — orquestrador local: roda os 4 modos em subprocesso, seg-sex, 1x/dia (marcador `.ultima_atualizacao`). Disparado pela Tarefa `GeotabSyncLocal`.
+- `atualizar_local.py` — orquestrador local: roda os 4 modos em subprocesso, seg-sex, 1x/dia (marcador `.ultima_atualizacao`). Disparado pela Tarefa `GeotabSyncLocal`. No fim, se todos OK, chama `_exportar_csv` (não-fatal).
+- `exportar_csv.py` (2026-06-22) — exporta cada view p/ CSV e sobe no Supabase Storage (links de download p/ clientes externos). Ver seção "Download CSV externo".
 - `iniciar_postgres.bat` — sobe o Postgres local (pasta Inicializar/logon).
 - `backup_geotab.bat` — pg_dump diário p/ `C:\Users\ygor.kouzak\backups` (mantém 14 dias; pasta Inicializar/logon).
 - `views.sql` / `views_backup.sql` — definição/backup das views.
@@ -56,6 +57,17 @@
 ## Taxa de utilização > 100% / dias_utilizados > dias_no_periodo (corrigido 2026-06-18)
 - CAUSA: `dias_no_periodo` é calculado AO VIVO na view (`LEAST(fim_mes, CURRENT_DATE) - ini_mes + 1`). Linha de tb_resumo_mensal p/ um MÊS FUTURO (relativo a hoje) → dias_no_periodo ≤ 0 com dias_utilizados ≥ 1 → taxa > 100. Mês futuro surgia porque `atualizar_resumo_mes_corrente` só tinha limite INFERIOR (`data_partida >= ini do mês`); viagem com data vazada p/ o mês seguinte criava a linha. Intermitente (some quando os dados são reescritos).
 - FIX: (1) código — `atualizar_resumo_mes_corrente` ganhou limite SUPERIOR (`AND data_partida < ini_mes + 1 mês`), confinando ao mês corrente. (2) views `vw_resumo_frota_mensal` e `vw_indicadores_mensal` — `WHERE make_date(ano,mes,1) <= CURRENT_DATE` (ignora meses não iniciados) + taxa com `LEAST(dias_utilizados, dias_no_periodo)` (nunca passa de 100). Power BI: dar refresh p/ limpar valores cacheados.
+
+## Download CSV externo (exportar_csv.py → Supabase Storage) (2026-06-22)
+- OBJETIVO: clientes externos baixam cada view via link público estável, SEM depender do notebook ligado (snapshot diário, não ao vivo — a máquina dorme/sem admin/GPO).
+- DESENHO: após a sync, `exportar_csv.py` (via `psql \copy`, NÃO carrega na RAM) gera 1 arquivo de NOME FIXO por view e sobe no Storage com `x-upsert` (link nunca muda). Gera um `index.html` com todos os links = O link que se manda ao cliente. Pasta `exports/` (gitignored, recriada a cada run).
+- 8 views "dashboard" → `.csv` inteiro (maior: vw_motoristas 39 MB). `vw_relatorio_viagens` (1,6 GB / 3,58M linhas, ano inteiro) → DIVIDIDA POR MÊS + gzip, PARTICIONADA POR TAMANHO (`_gzip_particionado`): cada parte tem CSV cru <= ALVO_CSV (180 MB) → gzip ~35 MB. Mês pequeno = `_YYYY-MM.csv.gz`; mês grande = `_YYYY-MM_p1/_p2.csv.gz`. ORDER BY data_partida piora a compressão vs arquivo único (gz por mês ~46-63 MB se inteiro, por isso o split).
+- LIMITE FREE TIER: Supabase Storage = **50 MB POR ARQUIVO** no plano grátis (não-negociável). Mês inteiro gzipado passava de 50 MB e dava HTTP 400 → daí o particionamento (LIMITE_ARQUIVO/ALVO_CSV em exportar_csv.py). Storage total free = 1 GB (snapshot ~369 MB cabe).
+- REFRESH: `limpar_bucket()` apaga TODOS os objetos antes de subir o snapshot do dia (evita órfãos quando um mês muda de nº de partes). Upload com `x-upsert`.
+- ENCODING: `PGCLIENTENCODING=UTF8` é OBRIGATÓRIO no \copy — sem isso o psql assume WIN1252 do console e aborta no 1º acento.
+- SUPABASE: o projeto antigo (dyqrxszogdcsjnhodmrv) foi DELETADO (DNS não resolve) após a migração p/ local. Criado projeto NOVO `geotab-export` (ref `ldhelbygqrjqchistrgp`, org ygormaas's/gsfnitfhyiwxoefcmojk, free, sa-east-1) só p/ Storage. URL + service_role key JÁ no .env; pipeline VALIDADO ao vivo 2026-06-22 (21 arquivos no ar, downloads públicos HTTP 200). Caveat free tier: projeto pausa após ~7d sem atividade (upload diário mantém acordado).
+- LINK P/ O CLIENTE (índice de todos): `https://ldhelbygqrjqchistrgp.supabase.co/storage/v1/object/public/geotab-csv/index.html`. Arquivo direto: `{STORAGE_URL}/storage/v1/object/public/geotab-csv/<arquivo>`.
+- BUG CORRIGIDO (2026-06-23): no fluxo automático o export era PULADO todo dia (`export CSV pulado (sem SUPABASE_SERVICE_KEY no .env)`). Causa: `atualizar_local.py` checava a chave via `os.environ` mas NÃO carregava o `.env` (só os modos/`exportar_csv.py` faziam `load_dotenv` por conta própria). Fix: `load_dotenv(BASE/".env")` no topo do orquestrador. Por isso só funcionava quando se rodava o `exportar_csv.py` na mão.
 
 ## Decisões importantes
 - TIMESTAMP sem timezone, valores em BRT (Brasil sem horário de verão desde 2019)
@@ -106,6 +118,10 @@
 - FEITO (usuário, 2026-06-17): On-premises Data Gateway configurado + dataset Power BI repontado p/ localhost; serviço do Render deletado. Inspeção via DBeaver (localhost:5432/geotab/postgres).
 
 ## Última sessão
+- Data: 2026-06-23
+- Resumo: Sync diária de 23/jun OK (rodou às 08:23, 90.707 viagens, marcador gravado). Descoberto que o export CSV automático vinha sendo PULADO todo dia desde a criação (guard sem `load_dotenv` no orquestrador — ver BUG CORRIGIDO na seção Download CSV). Corrigido com `load_dotenv(BASE/".env")` em `atualizar_local.py`; guard validado (passa True). Rodado `exportar_csv.py` na mão p/ atualizar o snapshot público (estava de 22/jun): 21 arquivos no ar, snapshot de 23/jun. Commitado o pipeline CSV + o fix (era trabalho não-commitado de 22/jun).
+- Data: 2026-06-22
+- Resumo: Sync diária de 22/jun OK (marcador gravado). Criado pipeline de DOWNLOAD CSV EXTERNO (ver seção própria): `exportar_csv.py` + integração não-fatal no `atualizar_local.py` + template no .env + `exports/` no .gitignore. Medidos os tamanhos reais das 9 views (viagens = 1,6 GB, resto leve). Descoberto que o projeto Supabase do geotab foi deletado; criado projeto novo `geotab-export` via MCP (ACTIVE_HEALTHY, domínio responde 401=ok). Usuário colou a service_role key; pipeline LIGADO e VALIDADO ao vivo: bucket público `geotab-csv` criado, 21 arquivos no ar (8 views + viagens por mês particionada <50MB + index.html), downloads públicos HTTP 200. Descoberto/contornado o limite de 50 MB/arquivo do free tier (particionamento por tamanho) + limpeza do bucket por refresh. NÃO commitado.
 - Data: 2026-06-19
 - Resumo: Sync diária de 19/jun rodou OK (4 fases, 135.656 viagens, marcador gravado). Adicionadas `marca`+`modelo` à `vw_resumo_frota_mensal` (só nessa view, a pedido) — em views.sql e no banco local (DROP+CREATE p/ inserir após `placa`). vw_indicadores_mensal não mexida. Criada `vw_motoristas_anual` (formato antigo, `km_total`/nomes legados) p/ destravar o Power BI que quebrava com `42703: coluna km_total não existe` (modelo feito na vw_motoristas anual, que virou diária em 18/jun). Add `todos_grupos` às duas views de motoristas. Investigada a queixa de "metade sem matrícula": é falso — cobertura real ~98% (ver seção views); `nome`=login/e-mail, matrícula=employeeNo. Add coluna `nome_completo` (User.firstName, 100% preenchido) em tb_motoristas + extrair_motoristas + migração; exposta como `motorista_nome_completo` nas duas views. PG caiu no meio (gotcha 0xC000013A) e foi religado. NÃO commitado.
 - Data: 2026-06-18

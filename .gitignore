@@ -7,3 +7,5 @@ atualizacao_local.log
 # Logs de execuções avulsas (backfills, geocode)
 *_run.log
 __pycache__/
+# CSVs gerados p/ download externo (recriados a cada export)
+exports/
