@@ -118,6 +118,8 @@
 - FEITO (usuário, 2026-06-17): On-premises Data Gateway configurado + dataset Power BI repontado p/ localhost; serviço do Render deletado. Inspeção via DBeaver (localhost:5432/geotab/postgres).
 
 ## Última sessão
+- Data: 2026-06-24
+- Resumo: Sync diária de 24/jun OK (rodou 08:22, 4 fases, 93.220 viagens, marcador gravado). O export CSV automático rodou (load_dotenv do dia 23 funcionou — não foi mais "pulado") mas FALHOU não-fatal na etapa da vw_relatorio_viagens (1ª query psql, exit 0xC000013A = gotcha do PG/console). Rodado `exportar_csv.py` na mão logo depois: exit 0, snapshot público atualizado p/ 24/jun (8 views + viagens 2025-12..2026-06 em 2 partes/mês + index.html). Falha do automático considerada TRANSITÓRIA (mesmo script passou limpo na mão). Se recorrer no automático: blindar com retry na query do export ou respiro entre sync e export. Não commitado (sem mudança de código).
 - Data: 2026-06-23
 - Resumo: Sync diária de 23/jun OK (rodou às 08:23, 90.707 viagens, marcador gravado). Descoberto que o export CSV automático vinha sendo PULADO todo dia desde a criação (guard sem `load_dotenv` no orquestrador — ver BUG CORRIGIDO na seção Download CSV). Corrigido com `load_dotenv(BASE/".env")` em `atualizar_local.py`; guard validado (passa True). Rodado `exportar_csv.py` na mão p/ atualizar o snapshot público (estava de 22/jun): 21 arquivos no ar, snapshot de 23/jun. Commitado o pipeline CSV + o fix (era trabalho não-commitado de 22/jun).
 - Data: 2026-06-22
