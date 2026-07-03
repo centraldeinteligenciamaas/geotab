@@ -4,7 +4,7 @@
 > o que o projeto faz, como ele funciona e como operá-lo no dia a dia.
 > Para o estado técnico resumido entre sessões de desenvolvimento, ver `.claude/context.md`.
 >
-> **Última atualização:** 2026-06-23
+> **Última atualização:** 2026-07-01
 
 ---
 
@@ -194,6 +194,10 @@ O Postgres local **morre se fecharem a janela/terminal que o hospeda** (exceçã
   (`PG_CTL`/`PGDATA`/`PG_HOST`/`PG_PORT`).
 - **Regra de ouro para o usuário:** nunca suba o banco por um terminal que vai fechar. Deixe o
   `iniciar_postgres.bat` do logon cuidar disso. Se fechar e o banco morrer, a próxima sync religa.
+- **Janela rotulada (2026-07-01):** o `iniciar_postgres.bat` agora abre uma janela com título
+  claro (`BANCO GEOTAB — NAO FECHE...`) e um banner explicando o que ela faz e quando pode ser
+  fechada (só depois de terminar o Power BI e a sync do dia; volta no próximo logon). Um loop
+  `timeout` mantém a janela aberta — deixe-a **minimizada**, não fechada.
 
 ---
 
@@ -256,6 +260,27 @@ acordado**, **Postgres no ar** e **serviço do gateway rodando**.
   `pg_ctl -D C:\Users\ygor.kouzak\pgdata start` e reexecutar o refresh.
 - Nos dias em que o PC fica desligado às 10:00, o refresh falha (limitação do banco ser local
   nesta máquina) — não há solução sem mudar a fonte para um host sempre no ar.
+
+---
+
+## 10-B. Power BI SEM gateway — via CSV público (alternativa; 2026-07-01)
+
+Quando **não é possível criar o gateway**, o Power BI Service pode atualizar lendo os CSVs
+que o `exportar_csv.py` já publica no Supabase Storage (fonte **Web / Anônimo** refresca no
+Service sem gateway).
+
+- **Vantagem:** o refresh **independe do PC ligado / Postgres no ar** — lê o último snapshot
+  diário publicado na nuvem. Não usa o usuário/senha do Postgres.
+- **Custo:** exige refazer as consultas do `.pbix` para ler os CSVs em vez da conexão Postgres
+  (modelo/DAX seguem iguais, pois são as mesmas views).
+- **Frescura:** a do último export diário (`exportar_csv.py` no fim da sync). Se um dia não
+  exporta, o Service reapresenta o snapshot anterior (sem erro de conexão).
+- **Como fazer (consultas M prontas + passo a passo):** ver a pasta `powerbi_queries/`
+  (1 arquivo `.m` por view + `README.md`). Inclui as 8 views dashboard e a
+  `vw_relatorio_viagens` combinando todos os meses (lê o `index.html` p/ descobrir os
+  arquivos, aguenta partições `_p1`/`_p2`). Usa o padrão `Web.Contents(base, [RelativePath=...])`
+  p/ o Service aceitar as URLs dinâmicas. Cada script é autossuficiente (não depende de
+  funções auxiliares).
 
 ---
 
