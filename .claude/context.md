@@ -70,6 +70,131 @@
 - LINK P/ O CLIENTE (índice de todos): `https://ldhelbygqrjqchistrgp.supabase.co/storage/v1/object/public/geotab-csv/index.html`. Arquivo direto: `{STORAGE_URL}/storage/v1/object/public/geotab-csv/<arquivo>`.
 - BUG CORRIGIDO (2026-06-23): no fluxo automático o export era PULADO todo dia (`export CSV pulado (sem SUPABASE_SERVICE_KEY no .env)`). Causa: `atualizar_local.py` checava a chave via `os.environ` mas NÃO carregava o `.env` (só os modos/`exportar_csv.py` faziam `load_dotenv` por conta própria). Fix: `load_dotenv(BASE/".env")` no topo do orquestrador. Por isso só funcionava quando se rodava o `exportar_csv.py` na mão.
 
+## Views renomeadas p/ vw_saneago_* (2026-08-24)
+- As 9 views ganharam prefixo `vw_saneago_` (`rename_saneago_2026-08-24.sql`; ALTER VIEW RENAME — deps entre views por OID, não quebram). Nomes: vw_saneago_cadastro/status/comportamento/relatorio_viagens/resumo_frota_mensal/indicadores_mensal/motoristas/motoristas_anual/grupos.
+- CSV público: `exportar_csv.py` foi DESACOPLADO (VIEWS agora é lista de tuplas `(view_no_banco, nome_arquivo)`; VIEW_MENSAL idem). Query usa o nome novo, ARQUIVO mantém o antigo (vw_cadastro.csv etc.) → links dos clientes NÃO quebram. `exportar_view`/`exportar_view_mensal` ganharam param `arquivo`. Testado: lê vw_saneago_cadastro, grava vw_cadastro.csv (1062 linhas).
+- `geotab_supabase.py` só cita os nomes em COMENTÁRIOS (não usa view no código da sync) → não precisou mudar. `powerbi_queries/*.m` leem CSV por nome de arquivo (preservado) → não mudaram. M do painel atualizado em `Downloads/saneago_codigo_M_novo.md` (Item + variável renomeados).
+
+## CLIENTE SEMAD — 9 views `vw_semad_*` (2026-08-27) — `migracao_semad_2026-08-27.sql`
+- Espelho das 9 views da SANEAGO (mesmas colunas), filtrando SOMENTE o contrato do SEMAD.
+- **FILTRO POR INCLUSÃO**: `tb_contrato_semad(token)` + função `grupo_semad(todos_grupos)` (STABLE, match EXATO do token). Trocar/adicionar contrato = UPDATE/INSERT na tabela, **nenhuma view é recriada**. É o inverso do `grupo_visivel()` da SANEAGO (que é lista de EXCLUSÃO).
+- `arrumar_grupos_semad()` = `arrumar_grupos()` + remove tokens de contrato de OUTROS clientes (regex `[0-9]+/[0-9]{4}$` fora da tb_contrato_semad). Necessário porque os usuários MAAS carregam os 6 contratos no mesmo `todos_grupos`.
+- **CONTRATO CADASTRADO: `OPE_SEMAD - 035/2026`** (decisão do usuário). No Geotab hoje só existe `OPE_SEMAD - 006/2026` → **as 9 views retornam 0 linhas** até a origem ser atualizada. Não é bug.
+- ENSAIO validado (transação revertida, trocando p/ 006/2026): cadastro 14, status 14, comportamento 214, relatorio_viagens 6.846, resumo_frota_mensal 16, indicadores_mensal 8, grupos 1, motoristas 0, motoristas_anual 0. **0 órfãos de grupo_id** nas 5 views de fato, **0 vazamento** de SANEAGO/COMURG/REDEMOB/ECONOMIA.
+- **DESVIO CONSCIENTE (motoristas)**: as 2 views de motoristas escopam pelo **VEÍCULO** (`JOIN vw_semad_cadastro`), não pelos grupos do motorista como na SANEAGO. Motivo: os 30 "motoristas" com SEMAD são **usuários administrativos da MAAS** (`@maasservicos.com.br`) que pertencem a TODOS os 6 contratos; filtrar por eles traria **29 viagens em veículos da SANEAGO** (S0062/S0069/S0071/Presidência) para dentro do painel do SEMAD. Medido em 2026-08-27.
+- Removida a exclusão de placas TFA2G98/TFN3B44/TFR4E14 (correção específica da frota SANEAGO; nenhuma é do SEMAD).
+- SEM ORDER BY em relatorio_viagens/motoristas/motoristas_anual (regra de PERF). Volume é pequeno (~6,8k viagens) — não há risco de estouro de stream.
+- **PENDÊNCIAS NA ORIGEM (Geotab), não no pipeline**: (a) 10 dos 15 veículos estão **sem `placa`** (o campo licensePlate está vazio; a placa só existe dentro do texto de `tb_cadastro.veiculo`) → `veiculo` sai como " | VOLKSWAGEN | 14.190 CRM"; (b) **100% das 8.297 viagens do SEMAD têm `motorista_id='UnknownDriverId'`/nome "Nenhum"** e `tb_comportamento_motorista` tem 0 eventos para os 15 devices → sem chave/identificação de condutor nos veículos, as views de motorista ficam vazias mesmo com o contrato certo; (c) 1 veículo (RBP0F52) tem o token `OPE_SEMAD` **sem número de contrato** → fica de fora do match exato.
+- views.sql NÃO foi regenerado (segue só com as 9 da SANEAGO) — a definição do SEMAD vive na própria migração.
+
+## NÍVEIS REPETIDOS na hierarquia de grupos (2026-08-26) — `migracao_niveis_repetidos_2026-08-26.sql`
+- SINTOMA reportado: "coluna de regional com informação de superintendência; a de lotação também tem sup e reg".
+- CAUSA: dado de ORIGEM, não a função. No cadastro Geotab a mesma unidade aparece sob vários prefixos: `REG_S0021 - SUPERIN. DE ESTUDOS E PROJETOS | ULOT_S0021 - ... | SUP_S0021 - ...`. `split_grupo()` estava CERTO (pegava o token REG_/ULOT_); o token é que carrega conteúdo do nível de cima. Mesmo sintoma do Palmeiras (item 9).
+- REGRA: nível que só REPETE o código do nível acima → NULL. reg→NULL se `reg_codigo=sup_codigo`; ulot→NULL se `ulot_codigo=sup_codigo OR =reg_codigo`.
+- ANTES: 50 grupos c/ regional repetida (24 veículos), 335 c/ lotação repetida (208 veículos), de 1.721 grupos / 1.062 veículos. DEPOIS: 0/0/0. Hierarquias reais preservadas (S0021→G0123→V0123). reg_codigo começando com 'S' caiu de 37 → 0.
+- Aplicado via CREATE OR REPLACE (lista de colunas idêntica) → sem DROP, sem lock exclusivo travando com refresh do BI.
+- RESSALVA mantida: 2 grupos têm SÓ um token `ULOT_` com código de superintendência (ULOT_S0086, ULOT_S0090) e NADA acima — não é repetição. **0 veículos** nesses grupos (só motoristas). Zerar apagaria a única info de grupo; correção real é no cadastro Geotab.
+- Auditoria: `todos_grupos_original` guarda o texto cru.
+
+## REGRA DE TRABALHO (feedback do usuário, 2026-08-26)
+- **NUNCA decidir algo que contrarie instrução que ele já deu.** Se uma otimização colidir com um pedido anterior, PARAR e propor explicitamente com o trade-off medido, esperando a decisão. Mencionar a mudança num documento de entrega NÃO é autorização.
+- Caso que gerou a regra: ele pediu "todas as views devem ter a coluna todos_grupos"; ao otimizar a viagens (2,5 GB derrubando o refresh) eu removi a coluna de lá p/ economizar 635 MB e só avisei no doc. REVERTIDO — as 9 views voltaram a ter todos_grupos (+ grupo_id ao lado como chave leve opcional). Viagens voltou a 2.502 MB.
+
+## MARCA/MODELO: corrigir só typos, NÃO colapsar (2026-08-26) — `migracao_modelo_so_typos_2026-08-26.sql`
+- **ERRO MEU, corrigido a pedido do usuário**: `tb_modelo_canonico` casava por REGEX e colapsava todas as variantes em 3 nomes (ARGO/ARGO 1.0/ARGO DRIVE/ARGO DRIVE 1.0 → "ARGO 1.0"; 7 grafias de Saveiro → "SAVEIRO ROBUST"). Isso APAGAVA distinções reais de versão do veículo.
+- AGORA: `tb_veiculo_correcao(marca_raw, modelo_raw → marca_ok, modelo_ok)`, 15 linhas (um par por combinação existente). Corrige APENAS: typo (FITA→FIAT, VOKSWAGEN→VOLKSWAGEN), caixa (Fiat, VW Saveiro), marca abreviada (VW SAVEIRO→VOLKSWAGEN) e modelo gravado no campo da marca (modelo vazio: "ARGO DRIVE 1.0", "SAVEIRO CS RB MF", "FIAT/ARGO DRIVE 1.0", "VW SAVEIRO"). Fallback sem linha na tabela = cru em maiúsculas.
+- RESULTADO: **9 modelos distintos** preservados — SAVEIRO CS RB 656, ARGO DRIVE 1.0 391, SAVEIRO 7, POLO CL AB 3, e 1 cada de ARGO 1.0/SAVEIRO CS/ARGO DRIVE/ARGO/SAVEIRO CS RB MF. Total 1062, 0 sem classificação, 0 grafias erradas.
+- Só as FUNÇÕES mudaram (marca_padrao/modelo_padrao) — views absorvem sem recriar.
+- DIVERGÊNCIA CONSCIENTE do documento da SANEAGO: a pág. 4 dela pedia nomes canônicos ("SAVEIRO ROBUST", "ARGO 1.0"). O usuário decidiu preservar os modelos reais. **Rever o item 7 da triagem antes da devolutiva.**
+- PENDÊNCIA: `tb_modelo_canonico` segue no banco (obsoleta, nada usa). O DROP TABLE TRAVA enquanto houver refresh do Power BI lendo as views (lock exclusivo) — travou uma vez e fez a transação reverter inteira. Rodar `DROP TABLE IF EXISTS tb_modelo_canonico;` quando não houver refresh.
+- LIÇÃO: não incluir DROP TABLE na mesma transação de migrações de view — se travar no lock, perde tudo.
+
+## `veiculo` + `motorista_nome_completo` (2026-08-26) — `migracao_veiculo_e_motorista_2026-08-26.sql`
+- `veiculo` = `concat_ws(' | ', placa, marca_padrao, modelo_padrao)` → "SGZ5D49 | VOLKSWAGEN | SAVEIRO ROBUST". Montado das PADRONIZADAS, não do cru de tb_cadastro (que tem FITA/VOKSWAGEN/ARGO em 7 formas). Nas 5 views com placa: cadastro, status, comportamento, relatorio_viagens, resumo_frota_mensal. Em cadastro SUBSTITUIU o `veiculo` cru.
+- `motorista_nome_completo` (3ª coluna de motorista) em relatorio_viagens e status. `tb_viagens.motorista_nome` guarda o LOGIN (ex. clesio@saneago.com.br) — 74.377 viagens em 7 dias. Nome vem de `tb_motoristas.nome_completo` via LEFT JOIN em `motorista_id`. **Cobertura 69.725/69.725 = 100%**. Em status o join é por `nome` (tb_status não tem motorista_id); hoje status é 100% "Nenhum".
+- Volume viagens: 1.622 → 1.839 MB (+217 MB pelas 2 colunas). Tempo inalterado (3,3 s/1M — o JOIN em tb_motoristas não custou). Órfãos de grupo_id seguem 0.
+- ATENÇÃO/ERRO COMETIDO: o `DROP ... CASCADE` em vw_saneago_cadastro derrubou tb `vw_saneago_indicadores_mensal`, que NÃO estava na migração — recriada em seguida. Ao mexer em cadastro, SEMPRE recriar as 5 dependentes: status, comportamento, relatorio_viagens, resumo_frota_mensal, indicadores_mensal.
+
+## CHAVE `grupo_id` + volume da viagens (2026-08-26) — `migracao_grupo_id_2026-08-26.sql`
+- Usuário optou por MANTER o ano inteiro nas viagens (5,3M linhas) — não limitar período.
+- PROBLEMA: view de viagens = 2.484 MB num único stream → "Exception while reading from stream". `todos_grupos` (~126 bytes) repetido 5,3M vezes = **635 MB só de chave**.
+- FIX: `grupo_id` = `hashtext(todos_grupos)` (4 bytes, 31x menor) em TODAS as 9 views. Verificado: 1.721 grupos → 1.721 ids, ZERO colisão, ZERO órfãos em todas as views. `todos_grupos` FICA nas views pequenas (exibição) e SAIU da viagens. Removido tb `veiculo` da viagens (redundante c/ placa+modelo_padrao). **2.484 MB → 1.622 MB.**
+- ATENÇÃO: `hashtext` NÃO serve p/ endereço — 3 colisões em 125.622 distintos. Se um dia virar dimensão, usar a chave natural (lat,lon), que é única (156.038/156.038).
+- REMOVIDAS da viagens neste passo (derivadas, se precisar é trivial devolver): `tempo_ocioso_hhmm`, `duracao_parada_hhmm`. `duracao_hhmm` MANTIDA (é a do item 3).
+- No M: **remover `Table.AddIndexColumn`** (bufferiza a tabela toda em memória — principal suspeito da falha nesse volume) e definir `CommandTimeout=#duration(0,2,0,0)`. Se algum visual usar a coluna Índice, recriar via RANKX.
+- Resta ~1,6 GB, dos quais 743 MB são end_partida/end_chegada. Se falhar de novo: virar dimensão de endereços (cai p/ ~80 MB) — CUSTO: PBI só permite 1 relacionamento ativo entre 2 tabelas, então partida+chegada exigiria USERELATIONSHIP ou 2 cópias da dimensão. Alternativa simples: limitar período (90 dias = ~500 MB).
+- Server-side a viagens escala linear: 1M em 3,5 s → 5,3M em ~19 s.
+
+## PERF: SEM ORDER BY nas views grandes (2026-08-25) — `migracao_perf_e_compat_2026-08-25.sql`
+- **CAUSA RAIZ do "PostgreSQL: Exception while reading from stream" no Power BI**: `ORDER BY` em view obriga o PG a ordenar TODAS as linhas antes de devolver a 1ª. Em vw_saneago_relatorio_viagens (3,9M) eram **88 s p/ ler 200 mil linhas** → o BI estourava timeout. Achei 4 consultas do refresh presas há 17-22 min segurando lock (bloquearam até meu DROP VIEW; cancelei com pg_cancel_backend).
+- FIX: ORDER BY removido de relatorio_viagens, motoristas e motoristas_anual. **88 s → 0,77 s (114x)**. O BI ordena no modelo. **NÃO reintroduzir.** Views pequenas mantêm ORDER BY (custo irrelevante, ajuda inspeção manual).
+- motoristas segue ~20 s (scan de 3,9M viagens no CTE diário) — inerente, não é o ORDER BY. Medição de 40 s era cache frio.
+- COMPAT: `operacao` (cru) voltou à dimensão — o Power BI usa nos rótulos legados.
+
+## ERROS DE DAX após remover colunas (2026-08-25) — diagnóstico
+- Os erros que o usuário reportou NÃO eram do M: eram COLUNAS CALCULADAS DAX no .pbix referenciando colunas que a reescrita da consulta de grupos deixou de produzir (`todos_grupos_arrumado`, `Outros.1`, e `SUP 2`/`REG 2`/`ULOT 2` que dependiam de `SUP_`/`REG_`/`ULOT_`). Sintoma do PBI: "Expressões que geram tipo de dados variável não podem ser usadas para definir colunas calculadas" + cascata "Um erro ao carregar uma tabela anterior cancelou o carregamento".
+- FIX: o M de grupos voltou a produzir TODAS as colunas legadas, remontadas das novas: `todos_grupos_arrumado`=Text.Proper(todos_grupos); `sup`="SUP_"&sup_codigo; `SUP_`=sup_nome (idem reg/ulot); `gruposemnumero` e `Outros.1` via `Text.Combine(List.RemoveNulls({...}))` — sem nenhum ReplaceValue. Formato legado confere (sup era "SUP_S0062", SUP_ era o nome Proper).
+- PENDENTE p/ o usuário: colunas calculadas DAX que citem `uo_lotacao`/`sup`/`reg`/`ulot`/`lotacao`/`regional`/`superintendencia` nas tabelas de FATO ainda vão falhar (essas colunas foram removidas a pedido). Trocar por RELATED('public vw_grupos'[ulot_nome]) etc. Oferecido devolver uo_lotacao se preferir.
+
+## ORGANIZAÇÃO FINAL das colunas de grupo (2026-08-25) — `migracao_grupos_organizados_2026-08-25.sql`
+- `vw_saneago_grupos` (DIMENSÃO, única com quebra por nível): `todos_grupos_original` (cru) + `todos_grupos` (tratado = CHAVE) + `sup_codigo/sup_nome/sup_cod_nome` + `reg_*` + `ulot_*` + `operacao` + `outros`.
+- TODAS as outras views: SOMENTE `todos_grupos` (tratado). REMOVIDAS de lá: operacao/sup/reg/ulot/outros/sup_oficial (cadastro, resumo) e lotacao/regional/superintendencia/superintendencia_oficial (motoristas).
+- `grupo`/`uo_lotacao` REMOVIDOS em 2026-08-25 a pedido (`migracao_remove_lotacao_2026-08-25.sql`). Agora NENHUMA view de fato tem coluna de grupo além de `todos_grupos`. A lotação vem da dimensão (`ulot_nome`/`ulot_cod_nome`) via relacionamento. IMPORTANTE: em vw_saneago_indicadores_mensal o uo_lotacao saiu do SELECT **e do GROUP BY** (senão as linhas ficariam divididas por coluna invisível) → 5.539→4.866 linhas; VALIDADO que totais não mudaram (8.336 veic-mês, km bate). Quebra por lotação agora se faz no BI com `ulot_nome` na linha do visual.
+- CHAVE ÚNICA: 2.116 textos originais colapsam em 1.721 chaves (diferem só nos rótulos ignorados ou na ORDEM deles). A view AGRUPA por todos_grupos e mostra `min(original)` como representativo — o Power BI exige chave única p/ relacionamento muitos-p/-um. Os níveis são idênticos entre os originais de um grupo (só dependem dos tokens que sobrevivem à limpeza). VALIDADO: 1721 linhas = 1721 chaves, 0 órfãos em todas as views.
+- Dimensão COMPLETADA (2026-08-25): + `ope_codigo/ope_nome/ope_cod_nome` (4º nível) e `outros_nome`. Sem eles o M de grupos ainda precisaria dos ReplaceValue. `operacao` cru saiu (virou ope_*). As exceções já cadastradas valem aqui: SANEAGO→"CT. 30000070/2025", D2000→"Presidência", RESERVA→"Reserva" (via fallback initcap). Sobra 1 combo feio ("SUP | REG | ULOT | ..." — grupos literalmente chamados SUP/REG/ULOT), raro.
+- **ARMADILHA CRÍTICA p/ o BI**: NUNCA aplicar `Text.Proper` (ou qualquer transformação) em `todos_grupos` nas tabelas de FATO. É a chave do relacionamento; transformar no fato e não na dimensão faz o join parar de casar e os visuais ficam vazios. Os M ANTIGOS faziam isso — todos foram reescritos.
+- M REESCRITOS (2026-08-25) em `Downloads/saneago_codigo_M_novo.md`: os antigos quebrariam por falta de uo_lotacao/sup/reg/ulot/lotacao/regional/superintendencia/todos_grupos_arrumado/lot3. A maioria virou 3 linhas (Fonte + Item). No M de grupos, `gruposemnumero` = `Text.Combine(List.RemoveNulls({ope_nome, outros_nome, sup_nome, reg_nome, ulot_nome}), " | ")` — dispensa TODOS os ReplaceValue (níveis vazios não entram, em vez de virar barras soltas). Validado que toda coluna citada nos M/DAX existe.
+- No M de `vw_motoristas cadastro` REMOVI o dedup por `motorista_matricula`: com 1.391 motoristas sem matrícula, o Table.Distinct manteria só 1 e descartaria ~1.390 da dimensão. Dedup por motorista_nome (login, único) basta.
+- Guia: `Downloads/saneago_colunas_grupos_tratados.md`.
+
+## Desenho anterior de grupos (2026-08-25) — `migracao_todos_grupos_limpo_2026-08-25.sql` (base do atual)
+- REGRA (definida pelo usuário): **TODAS as views expõem `todos_grupos` LIMPO** (= `arrumar_grupos()`, sem Vehicle/Ethanol/Diesel/Compressed Natural Gas/Manually Classified Powertrain/etc.) — é a CHAVE p/ a dimensão. **SÓ `vw_saneago_grupos`** tem a quebra por nível com e sem código (sup_codigo/sup_nome/sup_cod_nome, reg_*, ulot_*). As colunas separadas foram REMOVIDAS de cadastro/resumo/indicadores/motoristas.
+- `tb_grupo_token_ignorado` (tabela) substituiu a lista fixa dentro de `arrumar_grupos` (que virou STABLE). ACHADO: **`Compressed Natural Gas` NÃO estava na lista antiga e vazava p/ o painel** (1 veículo). Combustível novo = 1 INSERT.
+- `vw_saneago_grupos` = UNION das combinações de tb_cadastro + tb_motoristas. CRÍTICO: só 263 das 1.348 combinações de motorista existem entre os veículos (19%) — sem a união, 81% dos motoristas ficariam órfãos ao relacionar por todos_grupos. Resultado: 1.707 combos, **0 órfãos** dos dois lados.
+- Views DERRUBADAS e recriadas (CREATE OR REPLACE não remove coluna); ordem de criação respeita dependências. `sup`/`reg`/`ulot`/`operacao`/`outros` MANTIDOS em vw_saneago_cadastro porque o M atual ainda usa — remover depois que o BI puxar da dimensão.
+- EFEITO COLATERAL ESPERADO: `vw_saneago_indicadores_mensal` 5.878→5.539 linhas (agrupa por todos_grupos; combos que só diferiam por combustível se fundiram). VALIDADO que nada se perdeu: 8.336 veículos-mês idêntico à fonte, km total bate (dif. 71 em 8,86M = arredondamento por grupo, pré-existente).
+- No BI: relacionar cada fato → `vw_grupos[todos_grupos]` (muitos-p/-um) e usar os campos da dimensão nas segmentações.
+
+## Grupos tratados: sup/reg/ulot de todos_grupos (2026-08-25) — HISTÓRICO (superado pelo desenho acima)
+- `todos_grupos` é a coluna que dita os 3 níveis. Migração `migracao_grupos_tratados_2026-08-25.sql` + tabela de exceções.
+- Funções: `grupo_codigo(p)` (IMMUTABLE, regex `^[A-Za-z]+_([^-\s]+)`), `grupo_nome(p)` (STABLE — consulta exceções; senão `initcap` do que vem após o 1º hífen), `grupo_cod_nome(p)` (concat_ws ' - ').
+- Colunas novas por nível em vw_saneago_cadastro/_grupos/_resumo_frota_mensal/_indicadores_mensal: `sup_codigo/sup_nome/sup_cod_nome`, `reg_*`, `ulot_*`. Ex.: "G0111 - Ger.Regional Serv. Itumbiara". Originais (sup/reg/ulot) preservados.
+- sup_* deriva de `sup_oficial()` → a correção do Palmeiras já vem embutida.
+- FORMATOS: padrão é `PREFIXO_CODIGO - NOME`, mas 36 linhas usam hífen SEM espaços (`REG_G0162-GERENCIA...`, `ULOT_T0171-DISTRITO-FLORES DE GOIAS`) — o regex cobre os dois e corta só no 1º hífen, preservando nome com hífen. Dispensa os ReplaceValue manuais de G0162/T0171 no M. Cobertura: 0 falhas. 16 sup / 68 reg / 346 ulot.
+- `tb_grupo_nome_excecao(codigo → nome_exibicao)`: initcap rebaixa siglas (SUMEG→Sumeg); G0162 já carregado. **É por aqui que entra o de-para do item 16** (abreviações Superv./Super./Sup.). INSERT resolve, sem recriar view.
+- ACHADO: "S0098 - SUBPROCURADORIA JURÍDICA JUDICIA" do PDF NÃO está truncado no dado — o cru é `...JUDICIAL` completo. Era corte de LARGURA DE COLUNA no visual do BI. Item 16 reclassificado (parte é ajuste de relatório).
+- MOTORISTAS (migracao_grupos_motoristas_2026-08-25.sql): mesmas colunas em vw_saneago_motoristas/_anual como `lotacao_*`, `regional_*`, `superintendencia_*` (+ `superintendencia_oficial`). Substituem `lot3` e TODOS os ReplaceValue do M.
+  - `tb_motoristas.lotacao` tem FALLBACK (extrair_motoristas usa o 1º grupo útil se não há ULOT_) → 2.994/159.792 linhas (1,9%) trazem REG_/SUP_/PRE_. Por isso `grupo_nome` ganhou 3º nível de COALESCE: exceção → nome após 1º hífen → texto cru capitalizado (nunca NULL). Era o que o lot3 fazia.
+  - Regex de `grupo_codigo`/`grupo_nome` relaxado p/ aceitar espaço ao redor do "_" (caso `PRE _ D2000`).
+  - Exceções carregadas: G0162 (SUMEG), D2000→"Presidência", SANEAGO→"CT. 30000070/2025".
+  - PERF: vw_saneago_motoristas leva ~20s, mas JÁ LEVAVA antes das colunas novas (elas somam ~1,2s / 6%). Custo é o scan de tb_viagens (3,9M) no CTE viagens_dia, não as funções. Cadastro 448ms, resumo 458ms.
+- Guia p/ o usuário: `Downloads/saneago_colunas_grupos_tratados.md`.
+
+## Apontamentos SANEAGO — itens 7-9 implementados (2026-08-25)
+- Origem: PDF "BI - MAAS - CORREÇÕES E SUGESTÕES" (12/08/2026, 9 slides). Triagem completa dos 18 apontamentos em `Downloads/triagem_apontamentos_saneago.md` (2 já resolvidos, 4 BI, 5 banco, 6 cliente, 1 improcedente).
+- Migração: `migracao_saneago_itens_7a9_2026-08-25.sql`. REGRA: colunas novas são ADITIVAS (marca/modelo/sup ORIGINAIS preservados) p/ não quebrar relacionamentos/medidas do BI. Exceção: endereço limpo NO LUGAR (é texto de exibição).
+- **Item 7 — modelo canônico**: `tb_modelo_canonico` (padrao regex → marca_padrao/modelo_padrao, por prioridade) + funções `modelo_padrao(marca,modelo)`/`marca_padrao(...)` (STABLE, leem tabela). Colunas `marca_padrao`/`modelo_padrao` em vw_saneago_cadastro, _relatorio_viagens, _resumo_frota_mensal. 15 grafias → 3 modelos (SAVEIRO ROBUST 665 / ARGO 1.0 394 / POLO CL 3), 0 sem classificação. VIRTUS e COMMANDER pré-cadastrados (prio 20) p/ caso a Q2 libere. Add modelo = INSERT, sem recriar view.
+- **Item 8 — endereço**: `limpar_endereco()` (IMMUTABLE) tira do INÍCIO: Plus Code do Google (`^[0-9A-Z]{4,}\+[0-9A-Z]+`, separador OPCIONAL — havia casos só com espaço) e nº/CEP solto (`^[0-9]+(-[0-9]+)*\s*[-,]`— o grupo composto evita picar CEP inicial ao meio, bug que a 1ª versão tinha). Aplicada em end_partida/end_chegada. Plus codes 3.296→0; nº solto 1.121→9 (malformados na origem, ex. `6 - 1 - Parque`, coord crua; não insisti p/ não apagar km de rodovia `46,7, BR-040`). 0 endereços normais alterados.
+- **Item 9 — hierarquia**: `tb_hierarquia_grupo(reg → sup_oficial)` + `sup_oficial(reg,sup)` (COALESCE: sem linha na tabela, devolve o original). Coluna `sup_oficial` em vw_saneago_cadastro, _resumo_frota_mensal, _grupos. Palmeiras (REG_G0155) agora 100% S0071 (1 veículo vinha errado sob S0062). PENDENTE de propósito: REG_G0341 sob S0071(2)/S0060(1) — cliente não citou, maioria fraca, NÃO adivinhar; corrigir = INSERT na tabela.
+- Itens 10 (campo "Outros") e 11 (texto do método de utilização): NÃO são mudança de banco. `outros` FICA no banco (o M do vw_grupos usa p/ montar gruposemnumero/Outros.1) — remover é decisão de visual. Texto do método já redigido na triagem; aplicar só depois do item 6 (agregação de % no BI).
+- Itens 3-6 (Power BI): guia escrito em `Downloads/saneago_ajustes_powerbi_itens_3a6.md` — falta o usuário APLICAR no .pbix. (3) duração: view já entrega `duracao_hhmm` texto HH:MM, o M converte p/ minutos com `Duration.Minutes` — remover; não virar tipo duration (exibe 0.14:02:00); somar só `duracao_segundos`. Máx 15h, 0 viagens ≥24h. (4) trocar campo da segmentação p/ `motorista_nome_completo` (100% preenchido); `motorista_nome` fica como chave técnica. (5) prefixo ULOT_: coluna `ulot` já vem limpa (só nome) e `Ulot_` tem o código com prefixo — opção (b) do doc junta `Text.AfterDelimiter([Ulot_],"_") & " - " & [ulot]` = "G0155 - Nome", que RESOLVE A CONTRADIÇÃO DA Q1 (Multas elogia código+nome, Frota pede tirar ULOT_). (6) taxa >100%: BI soma percentual; virou 2 medidas DAX (SUMX com MIN por linha / DIVIDE no fim) — remover tb as colunas `dia x hora liq` e `tx utilizaçao hr liq` do M.
+- CORREÇÃO no texto do método (item 11): `dias_no_periodo` são dias CORRIDOS (inclui fim de semana), não dias úteis — frota seg-sex tem teto prático ~70%.
+
+## MATRÍCULA = employeeNo (confirmado com usuário 2026-08-24)
+- A matrícula da SANEAGO é o `User.employeeNo` (formato `M######`), que o sync JÁ lê em `extrair_motoristas` (`geotab_supabase.py:755`). View e sync estão corretos.
+- Cobertura real no Geotab: só **70%** (3533/4985 motoristas isDriver). **1.391 motoristas de grupos visíveis estão SEM employeeNo** no Geotab → matrícula vazia no painel. NÃO é bug do pipeline; é lacuna de cadastro na ORIGEM. Só preenchendo o employeeNo no Geotab chega a 100% (o próximo sync traz sozinho).
+- Há um 2º número em `User.lastName` (10 dígitos, ex. 3065279919; 99% preenchido, mas 117 registros têm sobrenome de texto). NÃO é a matrícula — usuário confirmou que é o employeeNo. lastName segue ignorado.
+- Lista dos sem-matrícula exportada em `Downloads/saneago_motoristas_sem_matricula.csv` (login, nome_completo, lastName como pista, lotação) p/ correção no Geotab.
+- No BI: LOOKUPVALUE motorista↔viagens deve casar por `motorista_nome` (login, 100%) quando precisar cobrir todos; matrícula só cobre ~49% das linhas de viagens.
+
+## Filtro de grupos centralizado (REFACTOR Power BI SANEAGO, 2026-08-24)
+- Função `grupo_visivel(todos_grupos)` (IMMUTABLE) = FALSE se qualquer token do veículo casar por PREFIXO com a lista de exclusão (OPE_COMURG/SEINFRA/PEDREIRA/CS_BRASIL/P-CSB/AGETUL/SMT/SEPLANH/AMMA/SEMAD/SECULT/"SECRET. DA ECONOMIA"/"SERVIÇOS EM CAMPO"/ADMINISTRATIVO/"ASSISTÊNCIA SOCIAL"/"RECOLHIMENTO DE ANIMAIS"/"DIRETORIA/GERÊNCIA"/"ATERRO SANITÁRIO"/REDEMOB). **OPE_SANEAGO NÃO entra** (contrato principal). Para mudar a regra: editar SÓ a função.
+- Todas as views passaram a filtrar por ela: vw_cadastro (WHERE grupo_visivel + exclui placas TFA2G98/TFN3B44/TFR4E14 — o M tinha bug `or` que não excluía nada); vw_status/comportamento/resumo/indicadores herdam via JOIN vw_cadastro; vw_motoristas/vw_motoristas_anual/vw_grupos ganharam WHERE grupo_visivel próprio.
+- FUROS QUE EXISTIAM: vw_relatorio_viagens fazia `LEFT JOIN tb_cadastro` (cru, sem filtro) → virou `JOIN vw_cadastro`. vw_motoristas não tinha filtro nenhum. vw_cadastro viva estava SEM filtro (todo o filtro vivia no Power BI).
+- Colunas NOVAS aditivas movidas do M p/ SQL: vw_relatorio_viagens `velocidade_media_2` (>150→0) e `velo_max_2` (>200→0); vw_resumo_frota_mensal `modelo2` (modelo vazio→marca).
+- FICOU no Power BI (não mexer no SQL p/ não quebrar relacionamentos/medidas): Text.Proper, normalização do veiculo (FITA→FIAT, "/"→espaço, Upper), duração, renomeações amigáveis (gruposemnumero/lot3), índice, medidas dia*8 e tx utilização.
+- Efeito medido: vw_cadastro 1869→1062, vw_status 1210→1062. Códigos M novos entregues em `Downloads/saneago_codigo_M_novo.md`. Migração aplicada: `migracao_powerbi_2026-08-24.sql`; rollback: `views_backup_2026-08-24.sql`. views.sql regenerado do banco.
+
 ## Decisões importantes
 - TIMESTAMP sem timezone, valores em BRT (Brasil sem horário de verão desde 2019)
 - NullPool + pooler transaction mode → evita "max clients reached"
@@ -93,7 +218,7 @@
 - [ ] Confirmar RLS das tabelas após recuperação (views já corrigidas: security_invoker=on confirmado nas 7)
 - [ ] Rerun linter no Advisors após recuperação (painel congelado — linter não roda com banco lento)
 - [ ] Definir VIAGENS_DIAS=7 no Render antes de religar (sync diário regrava ano inteiro = provável causa do dreno de IO)
-- [ ] Exportar definição de vw_grupos para views.sql (existe no banco, falta no arquivo)
+- [x] Exportar definição de vw_grupos para views.sql (FEITO 2026-08-24 — views.sql regenerado do banco com as 9 views + funções)
 - [ ] Considerar WITH (security_invoker = on) nas views do views.sql (CREATE OR REPLACE sem a opção pode resetar)
 
 ## Gotchas / armadilhas (sessão 2026-06-12)
@@ -119,6 +244,12 @@
 - FEITO (usuário, 2026-06-17): On-premises Data Gateway configurado + dataset Power BI repontado p/ localhost; serviço do Render deletado. Inspeção via DBeaver (localhost:5432/geotab/postgres).
 
 ## Última sessão
+- Data: 2026-08-27
+- Resumo: Criadas as 9 views do cliente **SEMAD** (`vw_semad_*`, ver seção própria) espelhando a SANEAGO, com filtro por INCLUSÃO de contrato (`tb_contrato_semad` + `grupo_semad()`). Contrato cadastrado = `OPE_SEMAD - 035/2026` por decisão do usuário; **o Geotab só tem `006/2026`, então as views estão em 0 linhas** até a origem mudar (avisado). Ensaio com 006/2026 (transação revertida) provou o encanamento: 14 veículos / 6.846 viagens / 0 órfãos / 0 vazamento. Descoberto e barrado um vazamento entre clientes: os 30 "motoristas" do SEMAD são usuários MAAS presentes em todos os contratos, e a lógica da SANEAGO traria 29 viagens da SANEAGO — as views de motorista passaram a escopar pelo veículo. Levantadas 3 lacunas de cadastro na origem (10 veículos sem placa; 0% de identificação de motorista nas viagens; 1 veículo com token sem nº de contrato). NÃO commitado.
+- Data: 2026-08-25
+- Resumo: Avaliado o PDF de apontamentos da SANEAGO (12/08) — triagem dos 18 itens validada por consulta ao banco, em `Downloads/triagem_apontamentos_saneago.md`. Confirmado com o usuário que a frota correta é 1.062 (item 14 virou IMPROCEDENTE: os 1.036 da tela são veículos com viagem no período, não a frota; e a lista da SANEAGO soma 1.033, não os 1.040 declarados) — exportada `saneago_frota_1062_placas.csv` como comprovação. Implementados os itens 7-9 (ver seção própria): modelo canônico, limpeza de endereço e hierarquia regional→superintendência. views.sql regenerado. NÃO commitado.
+- Data: 2026-08-24
+- Resumo: REFACTOR das views p/ o painel Power BI SANEAGO (ver seção "Filtro de grupos centralizado"). Criada função `grupo_visivel()` com a lista de exclusão única; filtros de grupo/palavra/Aterro/placas e limpezas aditivas (cap velocidade, modelo2) movidos do M p/ o SQL. Plugados 2 furos (vw_relatorio_viagens sem filtro; vw_motoristas sem filtro). Corrigido bug do filtro de placas (M usava `or`, nunca excluía). Migração aplicada e validada ao vivo (SANEAGO mantido, Aterro/placas/COMURG/SEMAD zerados, 0 vazamento). Entregues códigos M enxutos em `Downloads/saneago_codigo_M_novo.md`. views.sql regenerado do banco. DEPOIS: renomeadas as 9 views p/ vw_saneago_* (ver seção própria); exportar_csv.py desacoplado p/ preservar nomes de CSV; M e docs atualizados. NÃO commitado.
 - Data: 2026-06-24
 - Resumo: Sync diária de 24/jun OK (rodou 08:22, 4 fases, 93.220 viagens, marcador gravado). O export CSV automático rodou (load_dotenv do dia 23 funcionou — não foi mais "pulado") mas FALHOU não-fatal na etapa da vw_relatorio_viagens (1ª query psql, exit 0xC000013A = gotcha do PG/console). Rodado `exportar_csv.py` na mão logo depois: exit 0, snapshot público atualizado p/ 24/jun (8 views + viagens 2025-12..2026-06 em 2 partes/mês + index.html). Falha do automático considerada TRANSITÓRIA (mesmo script passou limpo na mão). Se recorrer no automático: blindar com retry na query do export ou respiro entre sync e export. Não commitado (sem mudança de código).
 - Data: 2026-06-23

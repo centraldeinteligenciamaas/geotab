@@ -4,7 +4,7 @@
 > o que o projeto faz, como ele funciona e como operá-lo no dia a dia.
 > Para o estado técnico resumido entre sessões de desenvolvimento, ver `.claude/context.md`.
 >
-> **Última atualização:** 2026-07-01
+> **Última atualização:** 2026-08-27
 
 ---
 
@@ -145,23 +145,112 @@ Gera os CSVs em `exports/` e sobe no bucket. Link do índice para o cliente:
 
 Regra: **uma view por tema.** Todas filtram grupos OPE_*/terceiros e usam `security_invoker = on`.
 
+> **Filtro de grupos centralizado (2026-08-24).** A lista de grupos excluídos vive numa
+> função única, `grupo_visivel(todos_grupos)` — retorna FALSO se o veículo pertencer a
+> qualquer grupo vetado (COMURG, SEINFRA, PEDREIRA, CS_BRASIL, AGETUL, SMT, SEPLANH, AMMA,
+> SEMAD, SECULT, "SECRET. DA ECONOMIA", ADMINISTRATIVO, "ASSISTÊNCIA SOCIAL", "RECOLHIMENTO
+> DE ANIMAIS", "DIRETORIA/GERÊNCIA", "SERVIÇOS EM CAMPO", "ATERRO SANITÁRIO", REDEMOB,
+> P-CSB). **OPE_SANEAGO é mantido** (contrato principal). `vw_cadastro` também exclui as
+> placas TFA2G98/TFN3B44/TFR4E14. As demais views herdam o filtro via JOIN em `vw_cadastro`
+> (status/comportamento/resumo/indicadores) ou aplicam `grupo_visivel` direto
+> (motoristas/grupos). **Para incluir ou tirar um grupo, edite só a função** — nenhuma view
+> nem o Power BI precisa mudar. Antes disso o filtro estava replicado em cada consulta M do
+> painel SANEAGO; foi movido para o SQL. Códigos M enxutos: `saneago_codigo_M_novo.md`.
+
+> **Renomeadas para `vw_saneago_*` em 2026-08-24.** Os arquivos CSV públicos mantêm o nome
+> antigo (o `exportar_csv.py` desacopla nome-da-view de nome-do-arquivo), então os links dos
+> clientes não quebram.
+
 | View | Granularidade | Uso |
 |---|---|---|
-| `vw_cadastro` | 1 linha/veículo | Snapshot atual da frota. |
-| `vw_status` | 1 linha/veículo | Tempo real (último contato). |
-| `vw_grupos` | por grupo | Dimensão de grupos. |
-| `vw_comportamento` | device × dia | Eventos do dia + odômetro. ~6 meses. |
-| `vw_relatorio_viagens` | 1 linha/viagem | Viagens com endereços, tempos de parada/ocioso. |
-| `vw_motoristas` | motorista × dia | Espelha `vw_comportamento` por motorista; BI agrega no período. |
-| `vw_motoristas_anual` | 1 linha/motorista | Versão **agregada no ano** (nomes legados `km_total`/`score_seguranca`), para o Power BI antigo. |
-| `vw_resumo_frota_mensal` | veículo × mês | Resumo mensal por veículo (inclui marca/modelo). |
-| `vw_indicadores_mensal` | grupo × mês | Indicadores mensais por grupo. |
+| `vw_saneago_cadastro` | 1 linha/veículo | Snapshot atual da frota. |
+| `vw_saneago_status` | 1 linha/veículo | Tempo real (último contato). |
+| `vw_saneago_grupos` | por grupo | Dimensão de grupos. |
+| `vw_saneago_comportamento` | device × dia | Eventos do dia + odômetro. ~6 meses. |
+| `vw_saneago_relatorio_viagens` | 1 linha/viagem | Viagens com endereços, tempos de parada/ocioso. |
+| `vw_saneago_motoristas` | motorista × dia | Espelha `vw_saneago_comportamento` por motorista; BI agrega no período. |
+| `vw_saneago_motoristas_anual` | 1 linha/motorista | Versão **agregada no ano** (nomes legados `km_total`/`score_seguranca`), para o Power BI antigo. |
+| `vw_saneago_resumo_frota_mensal` | veículo × mês | Resumo mensal por veículo (inclui marca/modelo). |
+| `vw_saneago_indicadores_mensal` | grupo × mês | Indicadores mensais por grupo. |
+
+> **Colunas padronizadas (2026-08-25).** Atendendo aos apontamentos da SANEAGO, as views
+> ganharam três colunas **novas** — as originais foram preservadas, então nada no Power BI
+> quebra; é só trocar o campo quando quiser:
+>
+> | Coluna nova | Substitui | O que faz |
+> |---|---|---|
+> | `modelo_padrao` / `marca_padrao` | `modelo` / `marca` | Unifica as 15 grafias em 3 modelos (SAVEIRO ROBUST, ARGO 1.0, POLO CL). Editável em `tb_modelo_canonico`. |
+> | `sup_oficial` | `sup` | Corrige vínculo errado de regional→superintendência (caso Palmeiras). Editável em `tb_hierarquia_grupo`. |
+
+> **Grupos (2026-08-25).** Todas as views expõem `todos_grupos` **tratado** — sem os rótulos
+> que não são grupo (`Vehicle`, `Ethanol`, `Diesel`, `Compressed Natural Gas`,
+> `Manually Classified Powertrain`…). É a **chave** para a dimensão de grupos, e é a **única**
+> coluna de grupo que elas têm.
+>
+> A quebra por nível existe **só em `vw_saneago_grupos`**: `todos_grupos_original` (texto cru),
+> `todos_grupos` (tratado/chave) e, por nível, código / nome / código + nome —
+> `sup_codigo`, `sup_nome`, `sup_cod_nome` (idem `reg_*` e `ulot_*`), ex.:
+> `G0111 - Ger.Regional Serv. Itumbiara`. Essa dimensão é a **união** das combinações de
+> veículos e de motoristas (sem os motoristas, 81% deles ficariam órfãos): 1.721 chaves únicas.
+>
+> As views de fato não têm **nenhuma** outra coluna de grupo — `grupo`/`uo_lotacao` foram
+> removidos em 25/08. A lotação vem da dimensão (`ulot_nome`, `ulot_cod_nome`).
+>
+> No Power BI: relacione cada tabela de fato a `vw_grupos` por `todos_grupos`
+> (muitos-para-um) e use os campos da dimensão nas segmentações e nas linhas dos visuais.
+>
+> Os endereços (`end_partida`/`end_chegada`) já saem limpos — sem Plus Code do Google nem
+> número de imóvel solto no início.
 
 > Para display de nome de motorista no BI, usar `motorista_nome_completo` (nome próprio);
 > `motorista_nome` é o login/e-mail. Matrícula = `employeeNo` (~98% de cobertura).
 
 > **Sempre conferir a definição real com `pg_get_viewdef` antes de assumir o que o `views.sql` diz** —
 > o arquivo já ficou dessincronizado do banco no passado.
+
+### 6-B. Cliente SEMAD — views `vw_semad_*` (2026-08-27)
+
+Conjunto **espelho** das 9 views da SANEAGO, com as mesmas colunas, servindo o painel do
+cliente SEMAD. Migração: `migracao_semad_2026-08-27.sql`.
+
+**O filtro é por INCLUSÃO de contrato** (o oposto da SANEAGO, que é lista de exclusão):
+
+| Objeto | Papel |
+|---|---|
+| `tb_contrato_semad(token)` | Contrato(s) do cliente, no formato exato em que aparecem em `todos_grupos`. |
+| `grupo_semad(todos_grupos)` | TRUE se algum grupo do registro casar exatamente com um token da tabela. |
+| `arrumar_grupos_semad(todos_grupos)` | Limpa os rótulos que não são grupo **e** remove contratos de outros clientes. |
+
+**Para trocar o contrato, edite só a tabela** — nenhuma view precisa ser recriada:
+
+```bash
+psql -h localhost -U postgres -d geotab -c "UPDATE tb_contrato_semad SET token='OPE_SEMAD - 006/2026';"
+```
+
+> ⚠️ **As views estão em 0 linhas hoje.** O contrato cadastrado é `OPE_SEMAD - 035/2026`,
+> mas no Geotab a frota do SEMAD está sob **`OPE_SEMAD - 006/2026`**. Enquanto a origem não
+> for atualizada (ou a tabela apontar para o token que existe), as 9 views não retornam nada.
+> Isso é o filtro funcionando, não uma falha. Com `006/2026` o conjunto entrega 14 veículos,
+> 6.846 viagens, 214 dias de comportamento e 16 linhas de resumo mensal — sem órfãos de grupo
+> e sem vazamento de outros contratos.
+
+**Diferenças em relação à SANEAGO** (deliberadas):
+
+1. `vw_semad_motoristas` e `vw_semad_motoristas_anual` escopam pela **frota do contrato**,
+   não pelos grupos do motorista. Os usuários com o grupo SEMAD são administrativos da MAAS
+   e pertencem a **todos** os contratos; usar a lógica da SANEAGO colocaria 29 viagens de
+   veículos da **SANEAGO** dentro do painel do SEMAD.
+2. Sem a exclusão das placas TFA2G98/TFN3B44/TFR4E14 (correção específica da frota SANEAGO).
+
+**Lacunas de cadastro no Geotab** (não são falha do pipeline — só se resolvem na origem):
+
+- **10 dos 15 veículos estão sem placa** (`licensePlate` vazio). A placa só existe dentro do
+  texto do campo `veiculo`, então a coluna sai como ` | VOLKSWAGEN | 14.190 CRM`.
+- **Nenhuma viagem do SEMAD tem motorista identificado** — as 8.297 viagens vêm com
+  `UnknownDriverId` / "Nenhum", e não há eventos por motorista. Sem chave de condutor nos
+  veículos, as duas views de motorista ficam vazias mesmo com o contrato correto.
+- 1 veículo (RBP0F52) tem o token `OPE_SEMAD` **sem número de contrato**, então não entra no
+  match exato.
 
 ---
 

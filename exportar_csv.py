@@ -48,18 +48,21 @@ SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 BUCKET = os.environ.get("SUPABASE_BUCKET", "geotab-csv")
 
 # Views "dashboard": pequenas, exportadas inteiras como .csv.
+# (view_no_banco, nome_do_arquivo). As views foram renomeadas p/ vw_saneago_*
+# em 2026-08-24, mas o ARQUIVO CSV mantém o nome antigo p/ não quebrar os links
+# públicos que os clientes externos já têm.
 VIEWS = [
-    "vw_cadastro",
-    "vw_status",
-    "vw_grupos",
-    "vw_comportamento",
-    "vw_motoristas",
-    "vw_motoristas_anual",
-    "vw_indicadores_mensal",
-    "vw_resumo_frota_mensal",
+    ("vw_saneago_cadastro",            "vw_cadastro"),
+    ("vw_saneago_status",              "vw_status"),
+    ("vw_saneago_grupos",              "vw_grupos"),
+    ("vw_saneago_comportamento",       "vw_comportamento"),
+    ("vw_saneago_motoristas",          "vw_motoristas"),
+    ("vw_saneago_motoristas_anual",    "vw_motoristas_anual"),
+    ("vw_saneago_indicadores_mensal",  "vw_indicadores_mensal"),
+    ("vw_saneago_resumo_frota_mensal", "vw_resumo_frota_mensal"),
 ]
-# View grande: dividida por mês e compactada. (view, coluna_de_data)
-VIEW_MENSAL = ("vw_relatorio_viagens", "data_partida")
+# View grande: dividida por mês e compactada. (view_no_banco, coluna_de_data, nome_do_arquivo)
+VIEW_MENSAL = ("vw_saneago_relatorio_viagens", "data_partida", "vw_relatorio_viagens")
 
 # Free tier do Supabase Storage: 50 MB POR ARQUIVO (não-negociável no plano grátis).
 # Particionamos cada mês em pedaços cujo CSV cru fica <= ALVO_CSV; o gzip dessa
@@ -119,9 +122,10 @@ def _gzip_particionado(csv_path, base):
     return partes
 
 
-def exportar_view(view):
-    """Exporta uma view inteira como .csv. Retorna o caminho do arquivo."""
-    arq = OUT / f"{view}.csv"
+def exportar_view(view, arquivo):
+    """Exporta uma view inteira como .csv. `view` = nome no banco; `arquivo` = nome
+    do CSV (mantido antigo p/ não quebrar links). Retorna o caminho do arquivo."""
+    arq = OUT / f"{arquivo}.csv"
     _psql_copy(
         rf"\copy (SELECT * FROM {view}) TO '{arq.as_posix()}' "
         r"WITH (FORMAT csv, HEADER true)"
@@ -129,22 +133,23 @@ def exportar_view(view):
     return arq
 
 
-def exportar_view_mensal(view, col):
-    """Exporta a view dividida por mês, cada mês compactado. Retorna lista de .csv.gz."""
+def exportar_view_mensal(view, col, arquivo):
+    """Exporta a view dividida por mês, cada mês compactado. `view` = nome no banco;
+    `arquivo` = base do nome do CSV. Retorna lista de .csv.gz."""
     meses = [m for m in _psql_query(
         f"SELECT DISTINCT to_char({col},'YYYY-MM') FROM {view} "
         f"WHERE {col} IS NOT NULL ORDER BY 1"
     ).splitlines() if m.strip()]
     arqs = []
     for ym in meses:
-        csv = OUT / f"{view}_{ym}.csv"
+        csv = OUT / f"{arquivo}_{ym}.csv"
         _psql_copy(
             rf"\copy (SELECT * FROM {view} "
             rf"WHERE {col} >= '{ym}-01'::date "
             rf"AND {col} < ('{ym}-01'::date + INTERVAL '1 month') "
             rf"ORDER BY {col}) TO '{csv.as_posix()}' WITH (FORMAT csv, HEADER true)"
         )
-        arqs += _gzip_particionado(csv, OUT / f"{view}_{ym}")
+        arqs += _gzip_particionado(csv, OUT / f"{arquivo}_{ym}")
     return arqs
 
 
@@ -226,7 +231,7 @@ def main():
 
     garantir_bucket()
     limpar_bucket()  # remove o snapshot de ontem (evita órfãos de nomes que mudaram)
-    gerados = [exportar_view(v) for v in VIEWS]
+    gerados = [exportar_view(v, arq) for v, arq in VIEWS]
     gerados += exportar_view_mensal(*VIEW_MENSAL)
 
     links = {}
